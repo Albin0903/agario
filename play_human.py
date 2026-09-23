@@ -138,28 +138,19 @@ class AgarGameVisualizer:
                         if not self.engine.get_player_cells(self.human_id):
                             self.engine.spawn_player(self.human_id, initial_mass=25.0)
 
-            # Get mouse world direction
+            # Get mouse world coordinates
             mx, my = pygame.mouse.get_pos()
             target_wx, target_wy = self._screen_to_world(mx, my)
 
             human_cells = self.engine.get_player_cells(self.human_id)
             if human_cells:
-                cx, cy, cr = self.engine.get_player_centroid(self.human_id)
-                dx = target_wx - cx
-                dy = target_wy - cy
-                dist = math.hypot(dx, dy)
-                if dist > 1e-4:
-                    tx, ty = dx / dist, dy / dist
-                else:
-                    tx, ty = 0.0, 0.0
-
                 trigger_val = -1.0
                 if split_trigger:
                     trigger_val = 0.8
                 elif eject_trigger:
                     trigger_val = 0.0
 
-                human_action = np.array([tx, ty, trigger_val], dtype=np.float32)
+                human_action = np.array([target_wx, target_wy, trigger_val], dtype=np.float32)
             else:
                 human_action = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 

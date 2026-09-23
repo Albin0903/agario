@@ -244,17 +244,19 @@ class AgarEngine:
         eff_radius = mass_to_radius(total_mass, scale=self.radius_scale)
         return float(cx), float(cy), float(eff_radius)
 
-    def _execute_split(self, player_id: int, target_dir: np.ndarray) -> int:
-        """Split player cells into halves along target direction."""
+    def _execute_split(self, player_id: int, target_raw: np.ndarray) -> int:
+        """Split player cells into halves along target direction or towards target coordinate."""
         p_cells = self.get_player_cells(player_id)
         if not p_cells:
             return 0
 
-        norm = np.linalg.norm(target_dir)
-        if norm > 1e-6:
-            dir_norm = target_dir / norm
+        # Check if target_raw is normalized direction [-1, 1] or world coordinates
+        is_normalized = (abs(float(target_raw[0])) <= 1.05 and abs(float(target_raw[1])) <= 1.05)
+        if is_normalized:
+            norm = np.linalg.norm(target_raw)
+            default_dir = target_raw / norm if norm > 1e-6 else np.array([1.0, 0.0], dtype=np.float32)
         else:
-            dir_norm = np.array([1.0, 0.0], dtype=np.float32)
+            default_dir = None
 
         new_cells: List[Cell] = []
         splits_performed = 0
@@ -270,6 +272,17 @@ class AgarEngine:
                 half_mass = cell.mass / 2.0
                 cell.mass = half_mass
                 cell.remerge_cooldown = self.remerge_cooldown_ticks
+
+                if default_dir is not None:
+                    dir_norm = default_dir
+                else:
+                    cdx = float(target_raw[0]) - cell.x
+                    cdy = float(target_raw[1]) - cell.y
+                    cdist = math.hypot(cdx, cdy)
+                    if cdist > 1e-6:
+                        dir_norm = np.array([cdx / cdist, cdy / cdist], dtype=np.float32)
+                    else:
+                        dir_norm = np.array([1.0, 0.0], dtype=np.float32)
 
                 # Projected new cell with boost
                 r = cell.radius
@@ -296,22 +309,35 @@ class AgarEngine:
         self.cells.extend(new_cells)
         return splits_performed
 
-    def _execute_eject(self, player_id: int, target_dir: np.ndarray) -> int:
-        """Eject mass from player cells towards target direction."""
+    def _execute_eject(self, player_id: int, target_raw: np.ndarray) -> int:
+        """Eject mass from player cells towards target direction or target coordinate."""
         p_cells = self.get_player_cells(player_id)
         if not p_cells:
             return 0
 
-        norm = np.linalg.norm(target_dir)
-        if norm > 1e-6:
-            dir_norm = target_dir / norm
+        is_normalized = (abs(float(target_raw[0])) <= 1.05 and abs(float(target_raw[1])) <= 1.05)
+        if is_normalized:
+            norm = np.linalg.norm(target_raw)
+            default_dir = target_raw / norm if norm > 1e-6 else np.array([1.0, 0.0], dtype=np.float32)
         else:
-            dir_norm = np.array([1.0, 0.0], dtype=np.float32)
+            default_dir = None
 
         ejected_count = 0
         for cell in p_cells:
             if cell.mass >= (self.eject_loss_mass + 10.0):
                 cell.mass -= self.eject_loss_mass
+
+                if default_dir is not None:
+                    dir_norm = default_dir
+                else:
+                    cdx = float(target_raw[0]) - cell.x
+                    cdy = float(target_raw[1]) - cell.y
+                    cdist = math.hypot(cdx, cdy)
+                    if cdist > 1e-6:
+                        dir_norm = np.array([cdx / cdist, cdy / cdist], dtype=np.float32)
+                    else:
+                        dir_norm = np.array([1.0, 0.0], dtype=np.float32)
+
                 r = cell.radius
                 spawn_x = float(np.clip(cell.x + dir_norm[0] * (r + 15.0), 5.0, self.width - 5.0))
                 spawn_y = float(np.clip(cell.y + dir_norm[1] * (r + 15.0), 5.0, self.height - 5.0))
@@ -409,45 +435,60 @@ class AgarEngine:
                 ejects = self._execute_eject(pid, target_vec)
                 self.step_events[pid]["ejects"] += ejects
 
+        # Resolve target world coordinates per player
+        player_targets: Dict[int, Tuple[float, float]] = {}
+        for pid in unique_players:
+            act = actions.get(pid, None)
+            if act is not None and len(act) >= 2:
+                a0, a1 = float(act[0]), float(act[1])
+                # Normalized direction or offset in [-1, 1]
+                if abs(a0) <= 1.05 and abs(a1) <= 1.05:
+                    cx, cy, _ = self.get_player_centroid(pid)
+                    # If idle (0, 0), target is centroid exactly
+                    # If non-zero, target is 400 world units along that direction
+                    player_targets[pid] = (cx + a0 * 400.0, cy + a1 * 400.0)
+                else:
+                    # Absolute world coordinates passed directly (e.g. mouse in play_human.py)
+                    player_targets[pid] = (a0, a1)
+            else:
+                cx, cy, _ = self.get_player_centroid(pid)
+                player_targets[pid] = (cx, cy)
+
         # 2. Update cell movements & impulses
         for cell in self.cells:
             # Cooldown decay
             if cell.remerge_cooldown > 0:
                 cell.remerge_cooldown -= 1
 
-            act = actions.get(cell.player_id, None)
-            if act is not None:
-                tx, ty = float(act[0]), float(act[1])
-                target_dist = math.hypot(tx, ty)
-                if target_dist > 1e-4:
-                    target_dir_x = tx / target_dist
-                    target_dir_y = ty / target_dist
-                else:
-                    target_dir_x, target_dir_y = 0.0, 0.0
-            else:
-                target_dir_x, target_dir_y = 0.0, 0.0
+            tx, ty = player_targets.get(cell.player_id, (cell.x, cell.y))
+            cdx = tx - cell.x
+            cdy = ty - cell.y
+            cdist = math.hypot(cdx, cdy)
 
             spd = mass_to_speed(cell.mass, v_base=self.v_base, v_min=self.v_min)
-            cell.vx = target_dir_x * spd
-            cell.vy = target_dir_y * spd
+
+            if cdist > 0.5:
+                # Smooth linear damping within 32 units to avoid jitter/orbiting (as in MultiOgar)
+                factor = min(1.0, cdist / 32.0)
+                step = min(cdist, spd * factor)
+                cell.vx = (cdx / cdist) * step
+                cell.vy = (cdy / cdist) * step
+            else:
+                cell.vx = 0.0
+                cell.vy = 0.0
 
             # Apply slow mass decay for cells above min mass
             if self.mass_decay_rate > 0.0 and cell.mass > 20.0:
                 decay = cell.mass * self.mass_decay_rate
                 cell.mass = max(20.0, cell.mass - decay)
 
-        # Natural centroid attraction when stationary / idle (subcells rejoin smoothly)
+        # Natural centroid attraction when stationary or mouse is placed at centroid
         for pid in unique_players:
             p_cells = self.get_player_cells(pid)
             if len(p_cells) > 1:
-                act = actions.get(pid, None)
-                is_idle = True
-                if act is not None and len(act) >= 2:
-                    if math.hypot(float(act[0]), float(act[1])) > 0.05:
-                        is_idle = False
-                if is_idle:
-                    cx = sum(c.x for c in p_cells) / len(p_cells)
-                    cy = sum(c.y for c in p_cells) / len(p_cells)
+                tx, ty = player_targets[pid]
+                cx, cy, _ = self.get_player_centroid(pid)
+                if math.hypot(tx - cx, ty - cy) < 50.0:
                     for c in p_cells:
                         cdx = cx - c.x
                         cdy = cy - c.y
@@ -553,10 +594,10 @@ class AgarEngine:
                     dist_sq = dx * dx + dy * dy
                     r_sum = ci.radius + cj.radius
 
-                    if dist_sq < (r_sum * r_sum):
-                        dist = math.sqrt(max(1e-6, dist_sq))
-                        # If both cooldowns expired, merge smaller into larger!
-                        if ci.remerge_cooldown == 0 and cj.remerge_cooldown == 0:
+                    dist = math.sqrt(max(1e-6, dist_sq))
+                    if ci.remerge_cooldown == 0 and cj.remerge_cooldown == 0:
+                        # Merging condition: when cells touch / penetrate each other
+                        if dist < (r_sum * 0.95):
                             if ci.mass >= cj.mass:
                                 ci.mass += cj.mass
                                 merged_ids.add(cj.id)
@@ -565,25 +606,29 @@ class AgarEngine:
                                 merged_ids.add(ci.id)
                                 break
                         else:
-                            # Elastic soft push apart to maintain separation while unmerged
-                            overlap = (r_sum - dist) * 0.6
+                            # Strong mutual attraction when ready to remerge and nearby
+                            if dist < (r_sum * 2.0):
+                                pull = min(3.5, (r_sum * 2.0 - dist) * 0.15)
+                                nx = dx / dist
+                                ny = dy / dist
+                                ci.x = float(np.clip(ci.x + nx * pull, ci.radius, self.width - ci.radius))
+                                ci.y = float(np.clip(ci.y + ny * pull, ci.radius, self.height - ci.radius))
+                                cj.x = float(np.clip(cj.x - nx * pull, cj.radius, self.width - cj.radius))
+                                cj.y = float(np.clip(cj.y - ny * pull, cj.radius, self.height - cj.radius))
+                    else:
+                        # Elastic rigid push apart to maintain separation while unmerged
+                        # Mass-weighted: smaller cell is displaced more (Ogar physics)
+                        overlap = r_sum - dist
+                        if overlap > 0:
+                            total_m = max(1e-4, ci.mass + cj.mass)
+                            ratio_i = cj.mass / total_m
+                            ratio_j = ci.mass / total_m
                             nx = dx / dist
                             ny = dy / dist
-                            ci.x = float(np.clip(ci.x - nx * overlap, ci.radius, self.width - ci.radius))
-                            ci.y = float(np.clip(ci.y - ny * overlap, ci.radius, self.height - ci.radius))
-                            cj.x = float(np.clip(cj.x + nx * overlap, cj.radius, self.width - cj.radius))
-                            cj.y = float(np.clip(cj.y + ny * overlap, cj.radius, self.height - cj.radius))
-                    elif ci.remerge_cooldown == 0 and cj.remerge_cooldown == 0:
-                        # Magnetic attraction force when remerge cooldown has expired
-                        dist = math.sqrt(max(1e-6, dist_sq))
-                        if dist < (r_sum * 2.5):
-                            pull = 1.0 * (1.0 - dist / (r_sum * 2.5))
-                            nx = dx / dist
-                            ny = dy / dist
-                            ci.x = float(np.clip(ci.x + nx * pull, ci.radius, self.width - ci.radius))
-                            ci.y = float(np.clip(ci.y + ny * pull, ci.radius, self.height - ci.radius))
-                            cj.x = float(np.clip(cj.x - nx * pull, cj.radius, self.width - cj.radius))
-                            cj.y = float(np.clip(cj.y - ny * pull, cj.radius, self.height - cj.radius))
+                            ci.x = float(np.clip(ci.x - nx * overlap * ratio_i, ci.radius, self.width - ci.radius))
+                            ci.y = float(np.clip(ci.y - ny * overlap * ratio_i, ci.radius, self.height - ci.radius))
+                            cj.x = float(np.clip(cj.x + nx * overlap * ratio_j, cj.radius, self.width - cj.radius))
+                            cj.y = float(np.clip(cj.y + ny * overlap * ratio_j, cj.radius, self.height - cj.radius))
 
             for c in p_cells:
                 if c.id not in merged_ids:

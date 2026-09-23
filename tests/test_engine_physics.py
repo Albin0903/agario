@@ -238,3 +238,23 @@ def test_virus_halo_spawning():
         assert np.all(dists >= 25.0)
 
 
+def test_subcells_mouse_target_convergence():
+    """Verify sub-cells independently steer inward toward a centered mouse coordinate."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0)
+    c1 = engine.spawn_player(0, initial_mass=50.0, xy=(400.0, 500.0))
+    c2 = Cell(id=engine._next_cell_id, player_id=0, x=600.0, y=500.0, mass=50.0, remerge_cooldown=300)
+    engine._next_cell_id += 1
+    engine.cells.append(c2)
+
+    # Place mouse target coordinate directly in the center between them (500.0, 500.0)
+    engine.step({0: np.array([500.0, 500.0, -1.0], dtype=np.float32)})
+
+    # Left cell must move right (vx > 0), right cell must move left (vx < 0)
+    assert c1.vx > 0.0, f"Expected c1.vx > 0, got {c1.vx}"
+    assert c2.vx < 0.0, f"Expected c2.vx < 0, got {c2.vx}"
+    # Distance between subcells must decrease
+    dist = abs(c2.x - c1.x)
+    assert dist < 200.0, f"Expected distance < 200.0, got {dist}"
+
+
+
