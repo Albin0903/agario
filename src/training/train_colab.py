@@ -46,27 +46,36 @@ def make_env_fn(
     """Factory to instantiate vectorized environment instances with self-play opponents."""
     def _init() -> AgarEnv:
         bot_opponents: Dict[int, Any] = {}
+        bot_cached_actions: Dict[int, np.ndarray] = {}
         step_counters: Dict[int, int] = {}
         last_sync = [0]
 
         def opponent_controller(bot_id: int, engine) -> np.ndarray:
             dummy_env = getattr(_init, "_cached_env", None)
 
-            # Periodically sync newly saved model checkpoints from disk
-            if pool is not None and dummy_env is not None and (dummy_env.current_step - last_sync[0]) > 300:
+            # Periodically sync newly saved model checkpoints from disk (every 2000 steps)
+            if pool is not None and dummy_env is not None and (dummy_env.current_step - last_sync[0]) > 2000:
                 last_sync[0] = dummy_env.current_step
                 pool.sync_from_disk()
 
-            # Refresh opponent assignment on death or every 300 steps
             curr_step = step_counters.get(bot_id, 0)
             step_counters[bot_id] = curr_step + 1
+
+            # Refresh opponent assignment on death or every 300 steps
             if bot_id not in bot_opponents or curr_step % 300 == 0:
                 bot_opponents[bot_id] = pool.sample_opponent() if (pool and len(pool) > 0) else None
+                bot_cached_actions.pop(bot_id, None)
 
             opp = bot_opponents.get(bot_id, None)
             if opp is not None and opp.policy is not None and dummy_env is not None:
+                # Frame-skip / action repeat (every 4 ticks) for opponent AI to sustain 500+ training FPS
+                if bot_id in bot_cached_actions and (curr_step % 4 != 0):
+                    return bot_cached_actions[bot_id]
+
                 obs = dummy_env._build_observation(player_id=bot_id)
-                return pool.get_action(opp, obs)
+                action = pool.get_action(opp, obs)
+                bot_cached_actions[bot_id] = action
+                return action
 
             # Fallback to heuristic action
             if dummy_env is not None and bot_id in dummy_env.heuristic_bots:
