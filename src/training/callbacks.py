@@ -85,9 +85,13 @@ class SelfPlayCallback(BaseCallback):
         if (self.num_timesteps - self.last_pool_update) >= self.update_interval_steps:
             self.last_pool_update = self.num_timesteps
             checkpoint_filename = f"ppo_step_{self.num_timesteps}.zip"
-            checkpoint_path = os.path.join(self.save_dir, checkpoint_filename)
+            checkpoint_path = os.path.join(self.pool.history_dir, checkpoint_filename)
 
             self.model.save(checkpoint_path)
+            # Also maintain latest in save_dir
+            latest_path = os.path.join(self.save_dir, "ppo_latest.zip")
+            self.model.save(latest_path)
+
             if self.verbose > 0:
                 print(f"[SelfPlayCallback] Checkpoint saved: {checkpoint_path}")
 

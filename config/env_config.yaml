@@ -5,8 +5,8 @@ arena:
   height: 2000.0
 
 physics:
-  v_base: 2.0
-  v_min: 0.5
+  v_base: 3.2
+  v_min: 0.8
   v_mass_exponent: -0.2
   radius_scale: 3.0          # r = sqrt(m) * 3
   eat_ratio: 1.1             # m_A >= 1.1 * m_B to consume
@@ -14,19 +14,19 @@ physics:
   min_cell_mass: 10.0
   max_subcells: 16
   remerge_cooldown_ticks: 300
-  split_boost_speed: 16.0
-  split_boost_decay: 0.85
+  split_boost_speed: 24.0
+  split_boost_decay: 0.90
   eject_loss_mass: 16.0
   eject_spawn_mass: 12.0
   eject_speed: 18.0
 
 entities:
-  num_pellets: 500
+  num_pellets: 1200
   pellet_mass: 1.0
   num_viruses: 10
   virus_mass: 100.0
-  virus_radius: 30.0
-  virus_split_threshold: 130.0
+  virus_radius: 20.0
+  virus_split_threshold: 140.0
 
 observation:
   view_radius_base: 500.0

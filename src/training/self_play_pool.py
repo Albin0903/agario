@@ -106,3 +106,22 @@ class SelfPlayPool:
             action = action_mean.squeeze(0).cpu().numpy()
             return np.clip(action, -1.0, 1.0)
 
+    def sync_from_disk(self) -> int:
+        """Scan history_dir on disk and load any newly saved checkpoints."""
+        if not os.path.exists(self.history_dir):
+            return 0
+        loaded = 0
+        existing_paths = set(entry.path for entry in self.pool)
+        for f in sorted(os.listdir(self.history_dir)):
+            if f.endswith(".zip"):
+                full_path = os.path.join(self.history_dir, f)
+                if full_path not in existing_paths:
+                    try:
+                        self.add_checkpoint(full_path, tag=f.replace(".zip", ""))
+                        existing_paths.add(full_path)
+                        loaded += 1
+                    except Exception:
+                        pass
+        return loaded
+
+

@@ -38,22 +38,32 @@ def make_env_fn(
     pool: Optional[SelfPlayPool] = None,
     seed: int = 42,
 ) -> Callable[[], AgarEnv]:
-    """Factory to instantiate vectorized environment instances."""
+    """Factory to instantiate vectorized environment instances with self-play opponents."""
     def _init() -> AgarEnv:
+        bot_opponents: Dict[int, Any] = {}
+        step_counters: Dict[int, int] = {}
+        last_sync = [0]
+
         def opponent_controller(bot_id: int, engine) -> np.ndarray:
-            # If self-play pool has frozen policies, sample with probability
-            if pool is not None and len(pool) > 0:
-                opp = pool.sample_opponent()
-                if opp is not None and opp.policy is not None:
-                    # Construct egocentric observation for bot_id
-                    # Using rank-safe dummy wrapper call or direct observation extraction
-                    dummy_env = getattr(_init, "_cached_env", None)
-                    if dummy_env is not None:
-                        obs = dummy_env._build_observation(player_id=bot_id)
-                        return pool.get_action(opp, obs)
+            dummy_env = getattr(_init, "_cached_env", None)
+
+            # Periodically sync newly saved model checkpoints from disk
+            if pool is not None and dummy_env is not None and (dummy_env.current_step - last_sync[0]) > 300:
+                last_sync[0] = dummy_env.current_step
+                pool.sync_from_disk()
+
+            # Refresh opponent assignment on death or every 300 steps
+            curr_step = step_counters.get(bot_id, 0)
+            step_counters[bot_id] = curr_step + 1
+            if bot_id not in bot_opponents or curr_step % 300 == 0:
+                bot_opponents[bot_id] = pool.sample_opponent() if (pool and len(pool) > 0) else None
+
+            opp = bot_opponents.get(bot_id, None)
+            if opp is not None and opp.policy is not None and dummy_env is not None:
+                obs = dummy_env._build_observation(player_id=bot_id)
+                return pool.get_action(opp, obs)
 
             # Fallback to heuristic action
-            dummy_env = getattr(_init, "_cached_env", None)
             if dummy_env is not None and bot_id in dummy_env.heuristic_bots:
                 return dummy_env.heuristic_bots[bot_id].get_action(engine)
 

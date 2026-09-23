@@ -15,7 +15,7 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.env.agar_engine import AgarEngine
-from src.env.gym_wrapper import HeuristicBot
+from src.env.gym_wrapper import HeuristicBot, AgarEnv
 
 try:
     import onnxruntime as ort
@@ -83,6 +83,10 @@ class AgarGameVisualizer:
         for i in range(1, self.num_bots + 1):
             self.engine.spawn_player(i, initial_mass=25.0)
 
+        # Env helper for extracting 84-dim observation vectors for ONNX models
+        self.env_helper = AgarEnv()
+        self.env_helper.engine = self.engine
+
         # Optional ONNX policy for bots
         self.onnx_session = None
         if onnx_model_path and os.path.exists(onnx_model_path) and HAS_ONNX:
@@ -101,7 +105,8 @@ class AgarGameVisualizer:
         self.names = {0: "YOU"}
         bot_names = ["Titan", "Blaze", "Apex", "Phantom", "Vortex", "Nebula", "Shadow", "Nova", "Cyber", "Echo"]
         for i in range(1, self.num_bots + 1):
-            self.names[i] = bot_names[(i - 1) % len(bot_names)]
+            prefix = "[AI] " if self.onnx_session is not None else ""
+            self.names[i] = prefix + bot_names[(i - 1) % len(bot_names)]
 
     def _world_to_screen(self, wx: float, wy: float) -> Tuple[int, int]:
         sx = int((wx - self.cam_x) * self.cam_zoom + self.screen_width / 2)
@@ -161,7 +166,19 @@ class AgarGameVisualizer:
                 if not self.engine.get_player_cells(bot_id):
                     self.engine.spawn_player(bot_id, initial_mass=25.0)
 
-                bot_act = self.heuristic_bots[bot_id].get_action(self.engine)
+                bot_act = None
+                if self.onnx_session is not None:
+                    try:
+                        obs = self.env_helper._build_observation(player_id=bot_id)
+                        inputs = {self.onnx_input_name: obs[np.newaxis, :]}
+                        outputs = self.onnx_session.run(None, inputs)
+                        bot_act = np.clip(outputs[0][0], -1.0, 1.0)
+                    except Exception:
+                        bot_act = None
+
+                if bot_act is None:
+                    bot_act = self.heuristic_bots[bot_id].get_action(self.engine)
+
                 actions[bot_id] = bot_act
 
             # Advance engine physics
