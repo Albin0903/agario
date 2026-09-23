@@ -70,9 +70,9 @@ class AgarGameVisualizer:
             num_viruses=10,
             v_base=3.2,
             v_min=0.8,
-            remerge_cooldown_ticks=2100,
+            remerge_cooldown_ticks=1800,
             remerge_cooldown_mass_factor=1.2,
-            mass_decay_rate=0.0003,
+            mass_decay_rate=0.00002,
         )
         self.human_id = 0
         self.num_bots = num_bots

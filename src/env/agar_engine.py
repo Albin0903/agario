@@ -510,10 +510,10 @@ class AgarEngine:
                 cell.vx = 0.0
                 cell.vy = 0.0
 
-            # Apply slow mass decay for cells above min mass
-            if self.mass_decay_rate > 0.0 and cell.mass > 20.0:
+            # Apply slow mass decay only for large cells (vanilla Agar.io: mass > 100.0)
+            if self.mass_decay_rate > 0.0 and cell.mass > 100.0:
                 decay = cell.mass * self.mass_decay_rate
-                cell.mass = max(20.0, cell.mass - decay)
+                cell.mass = max(100.0, cell.mass - decay)
 
         # Natural centroid attraction when stationary or mouse is placed at centroid
         for pid in unique_players:
@@ -629,25 +629,32 @@ class AgarEngine:
 
                     dist = math.sqrt(max(1e-6, dist_sq))
                     if ci.remerge_cooldown == 0 and cj.remerge_cooldown == 0:
-                        # Merging condition: when cells touch / penetrate each other
-                        if dist < (r_sum * 0.95):
-                            if ci.mass >= cj.mass:
-                                ci.mass += cj.mass
-                                merged_ids.add(cj.id)
-                            else:
-                                cj.mass += ci.mass
-                                merged_ids.add(ci.id)
-                                break
+                        # Once timers expire, cells are allowed to slide into each other (no rigid push)
+                        if ci.mass >= cj.mass:
+                            c_large, c_small = ci, cj
                         else:
-                            # Strong mutual attraction when ready to remerge and nearby
-                            if dist < (r_sum * 2.0):
-                                pull = min(3.5, (r_sum * 2.0 - dist) * 0.15)
-                                nx = dx / dist
-                                ny = dy / dist
-                                ci.x = float(np.clip(ci.x + nx * pull, ci.radius, self.width - ci.radius))
-                                ci.y = float(np.clip(ci.y + ny * pull, ci.radius, self.height - ci.radius))
-                                cj.x = float(np.clip(cj.x - nx * pull, cj.radius, self.width - cj.radius))
-                                cj.y = float(np.clip(cj.y - ny * pull, cj.radius, self.height - cj.radius))
+                            c_large, c_small = cj, ci
+
+                        # Deep penetration absorption: center of smaller cell must enter inside the boundary of larger cell
+                        absorb_threshold = c_large.radius
+                        if dist < absorb_threshold:
+                            c_large.mass += c_small.mass
+                            merged_ids.add(c_small.id)
+                            if c_small is ci:
+                                break
+                            continue
+                        elif dist < r_sum:
+                            # Gentle mass-weighted mutual attraction: smaller cell accelerates much faster towards larger cell
+                            total_m = ci.mass + cj.mass
+                            pull_mag = min(2.0, (r_sum - dist) * 0.08)
+                            pull_i = pull_mag * (cj.mass / total_m)
+                            pull_j = pull_mag * (ci.mass / total_m)
+                            nx = dx / dist
+                            ny = dy / dist
+                            ci.x = float(np.clip(ci.x + nx * pull_i, ci.radius, self.width - ci.radius))
+                            ci.y = float(np.clip(ci.y + ny * pull_i, ci.radius, self.height - ci.radius))
+                            cj.x = float(np.clip(cj.x - nx * pull_j, cj.radius, self.width - cj.radius))
+                            cj.y = float(np.clip(cj.y - ny * pull_j, cj.radius, self.height - cj.radius))
                     else:
                         # Elastic rigid push apart to maintain separation while unmerged
                         # Mass-weighted: smaller cell is displaced more (Ogar physics)

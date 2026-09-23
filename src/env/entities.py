@@ -5,8 +5,8 @@ from dataclasses import dataclass, field
 import math
 
 
-DEFAULT_MASS_DECAY_RATE: float = 0.0004  # ~1% mass loss every ~25 ticks over min mass
-MIN_DECAY_MASS: float = 20.0
+DEFAULT_MASS_DECAY_RATE: float = 0.00003  # ~0.18% mass loss per second (only over MIN_DECAY_MASS)
+MIN_DECAY_MASS: float = 100.0  # Vanilla Agar.io: cells under 100 mass do not decay
 SPLIT_IMPULSE_SPEED: float = 24.0
 SPLIT_DRAG: float = 0.90
 

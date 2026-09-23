@@ -290,5 +290,64 @@ def test_mass_dependent_remerge_cooldown():
     assert p1_cells[0].remerge_cooldown > p0_cells[0].remerge_cooldown
 
 
+def test_mass_decay_threshold_and_gentle_rate():
+    """Verify cells <= 100 mass do not decay, and cells > 100 decay gently."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0, mass_decay_rate=0.001)
+    # Small cell (50 mass <= 100)
+    c_small = engine.spawn_player(0, initial_mass=50.0, xy=(300.0, 500.0))
+    # Large cell (500 mass > 100)
+    c_large = engine.spawn_player(1, initial_mass=500.0, xy=(700.0, 500.0))
+
+    for _ in range(50):
+        engine.step({
+            0: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+            1: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+        })
+
+    # Small cell must remain exactly at 50 mass (no decay below 100)
+    assert c_small.mass == 50.0
+    # Large cell should have decayed slightly
+    assert c_large.mass < 500.0
+    assert c_large.mass > 450.0  # Gentle decay, not wiped out
+
+
+def test_non_instant_remerge_penetration():
+    """Verify cells ready to remerge do not pop instantly at edge touch, and small pieces move faster into big pieces."""
+    engine = AgarEngine(width=2000.0, height=2000.0, num_pellets=0, num_viruses=0)
+    # Large cell: mass 500, radius ~67.08
+    c1 = engine.spawn_player(0, initial_mass=500.0, xy=(1000.0, 1000.0))
+    c1.remerge_cooldown = 0
+
+    # Small cell: mass 50, radius ~21.21. r_sum ~88.3
+    # Place small cell at distance 80: edges touch and overlap slightly, but dist > r_large (67.08)
+    c2 = Cell(id=engine._next_cell_id, player_id=0, x=1080.0, y=1000.0, mass=50.0, remerge_cooldown=0)
+    engine._next_cell_id += 1
+    engine.cells.append(c2)
+
+    initial_x1 = c1.x
+    initial_x2 = c2.x
+
+    # Step once: they must NOT merge instantly because dist (80) > r_large (67.08)
+    engine.step({0: np.array([1000.0, 1000.0, -1.0], dtype=np.float32)})
+
+    p_cells = engine.get_player_cells(0)
+    assert len(p_cells) == 2, "Cells should not merge instantly at outer edge touch!"
+
+    # Small cell must move towards large cell much faster than large cell moves towards small cell
+    disp_small = abs(c2.x - initial_x2)
+    disp_large = abs(c1.x - initial_x1)
+    assert disp_small > disp_large, "Smaller cell should accelerate faster towards larger piece!"
+
+    # Bring small cell well inside large cell boundary (dist < r_large)
+    c2.x = c1.x + 30.0
+    engine.step({0: np.array([1000.0, 1000.0, -1.0], dtype=np.float32)})
+
+    # Now that it has deeply penetrated, absorption is finalized
+    p_cells_after = engine.get_player_cells(0)
+    assert len(p_cells_after) == 1
+    assert math.isclose(p_cells_after[0].mass, 550.0, rel_tol=1e-4)
+
+
+
 
 
