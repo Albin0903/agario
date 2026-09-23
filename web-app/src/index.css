@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+@theme {
+  /* --- Typography --- */
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif, "Apple Color Emoji", "Segoe UI Emoji",
+    "Segoe UI Symbol", "Noto Color Emoji";
+  --font-display: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Code", "Fira Code", monospace;
+
+  /* --- Easings (Spring-calibrated cubic-bezier fallbacks) --- */
+  --ease-snappy: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-smooth: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-gentle: cubic-bezier(0.33, 1, 0.68, 1);
+  --ease-bouncy: cubic-bezier(0.34, 1.56, 0.64, 1);
+
+  /* --- Durations --- */
+  --duration-fast: 150ms;
+  --duration-normal: 250ms;
+  --duration-slow: 400ms;
+
+  /* --- Surfaces (Radix Steps 1-2) --- */
+  --color-surface-canvas: var(--color-slate-50);
+  --color-surface-card: #ffffff;
+  --color-surface-muted: var(--color-slate-100);
+  --color-surface-subtle: var(--color-slate-200);
+
+  /* --- Borders (Radix Steps 6-8) --- */
+  --color-border-subtle: color-mix(in srgb, var(--color-slate-200) 60%, transparent);
+  --color-border-default: var(--color-slate-200);
+  --color-border-strong: var(--color-slate-300);
+
+  /* --- Text (Radix Steps 11-12) --- */
+  --color-text-primary: var(--color-slate-900);
+  --color-text-secondary: var(--color-slate-600);
+  --color-text-muted: var(--color-slate-400);
+
+  /* --- Semantic Functional States --- */
+  --color-success: var(--color-emerald-600);
+  --color-success-surface: var(--color-emerald-50);
+  --color-warning: var(--color-amber-600);
+  --color-warning-surface: var(--color-amber-50);
+  --color-danger: var(--color-rose-600);
+  --color-danger-surface: var(--color-rose-50);
+
+  /* --- Brand Archetype Tokens (5 core variables for rapid theme adaptation) --- */
+  --color-brand-primary: var(--color-indigo-600);
+  --color-brand-hover: var(--color-indigo-700);
+  --color-brand-surface: var(--color-indigo-50);
+  --color-brand-border: var(--color-indigo-200);
+  --color-brand-text: var(--color-indigo-700);
+}
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased selection:bg-indigo-500 selection:text-white min-h-screen;
+  }
+}

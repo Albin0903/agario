@@ -1,0 +1,125 @@
+package views
+
+type HomeProps struct {
+	Title       string
+	Description string
+	Health      HealthCardProps
+}
+
+templ Home(props HomeProps) {
+	@Layout(props.Title) {
+		<div class="space-y-8">
+			<!-- 1. En-tête produit & Contexte d'application -->
+			<div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-slate-200/80">
+				<div class="space-y-1">
+					<h1 class="text-2xl sm:text-3xl font-bold tracking-tight text-slate-900">
+						{ props.Title }
+					</h1>
+					<p class="text-sm text-slate-600 max-w-2xl leading-relaxed">
+						{ props.Description }
+					</p>
+				</div>
+				<!-- Contrôles secondaires et périphériques (Contrôle direct à la source) -->
+				<div class="flex items-center gap-2.5 self-start sm:self-auto">
+					<!-- Sélecteur de mode contextuel -->
+					<div class="relative inline-block text-left">
+						<select class="px-3 py-1.5 rounded-lg bg-white border border-slate-200 text-xs text-slate-700 font-medium focus:outline-none focus:ring-2 focus:ring-blue-500 shadow-xs cursor-pointer">
+							<option value="standard">Mode Standard</option>
+							<option value="advanced">Mode Avancé</option>
+							<option value="online" disabled>En ligne (bientôt)</option>
+						</select>
+					</div>
+					<!-- Bouton Règles / Aide -->
+					<button
+						type="button"
+						onclick="document.getElementById('rules-modal').showModal()"
+						class="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium border border-slate-200 shadow-xs transition-colors"
+					>
+						@IconHelp("w-3.5 h-3.5 text-slate-500")
+						<span>Règles</span>
+					</button>
+					<!-- Bouton Paramètres -->
+					<button
+						type="button"
+						class="inline-flex items-center p-1.5 rounded-lg bg-white hover:bg-slate-50 text-slate-600 hover:text-slate-900 text-xs border border-slate-200 shadow-xs transition-colors"
+						title="Paramètres de session"
+					>
+						@IconSettings("w-3.5 h-3.5")
+					</button>
+				</div>
+			</div>
+			<!-- 2. La Scène Centrale (The Stage) — Cœur immersif du produit -->
+			<section class="rounded-2xl border border-slate-200/90 bg-white p-8 sm:p-12 text-center relative overflow-hidden shadow-xl shadow-slate-200/60">
+				<div class="max-w-xl mx-auto space-y-6">
+					<!-- Indicateur d'état interactif (Contrôle direct à la source) -->
+					<button
+						type="button"
+						class="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-blue-50 border border-blue-200/80 text-xs text-blue-700 font-medium hover:bg-blue-100/70 transition-colors cursor-pointer"
+						title="Cliquer pour basculer le statut"
+					>
+						<span class="w-2 h-2 rounded-full bg-blue-600 animate-pulse"></span>
+						<span>Session active · Prêt pour l'activité</span>
+					</button>
+					<!-- Titre de la scène -->
+					<div class="space-y-2">
+						<h2 class="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
+							Espace d'interaction principal
+						</h2>
+						<p class="text-xs sm:text-sm text-slate-600 leading-relaxed">
+							Ce conteneur central accueille l'activité majeure du produit (grille interactive, plateau mécanique à couches, tableau de bord ou espace de travail).
+						</p>
+					</div>
+					<!-- Hiérarchie des actions : Niveau 1 (Primaire) et Niveau 2 (Secondaire) -->
+					<div class="flex flex-col sm:flex-row items-center justify-center gap-3 pt-2">
+						<!-- Action Primaire (1 seule par écran) -->
+						<button
+							type="button"
+							class="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 active:translate-y-0.5 text-white font-semibold text-sm shadow-md shadow-blue-500/25 transition-all focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"
+						>
+							Démarrer l'activité
+						</button>
+						<!-- Action Secondaire -->
+						<a
+							href="/app/"
+							class="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-sm font-medium border border-slate-200 transition-colors"
+						>
+							Ouvrir la Console
+						</a>
+					</div>
+				</div>
+			</section>
+			<!-- 3. Périphériques fonctionnels & Scène non-bloquante -->
+			<div class="grid grid-cols-1 md:grid-cols-3 gap-6 pt-2">
+				<div class="md:col-span-2 space-y-3">
+					<h3 class="text-xs font-semibold uppercase tracking-wider text-slate-500">
+						Statut opérationnel
+					</h3>
+					<div
+						id="health-card-container"
+						hx-get="/api/health/fragment"
+						hx-trigger="every 15s"
+						hx-swap="innerHTML"
+					>
+						@HealthCard(props.Health)
+					</div>
+				</div>
+				<!-- Contrôles système et actions de niveau 3 -->
+				<div class="rounded-xl border border-slate-200/80 bg-white p-5 flex flex-col justify-between space-y-4 shadow-xs">
+					<div class="space-y-1">
+						<h4 class="text-xs font-semibold uppercase tracking-wider text-slate-500">Gestion de session</h4>
+						<p class="text-xs text-slate-500 leading-relaxed">
+							Actions de maintenance et réinitialisation de l'environnement utilisateur.
+						</p>
+					</div>
+					<!-- Action Système / Destructive (Niveau 3) -->
+					<button
+						type="button"
+						class="w-full text-xs text-rose-600 hover:text-rose-700 hover:bg-rose-50 px-3 py-2 rounded-lg border border-rose-200 transition-colors text-left font-medium"
+					>
+						↺ Réinitialiser les données locales
+					</button>
+				</div>
+			</div>
+		</div>
+	}
+}

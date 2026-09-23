@@ -1,0 +1,62 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/tmp/
+
+# Go
+/vendor/
+*.test
+*.out
+coverage.txt
+coverage.html
+
+# Frontend
+node_modules/
+web-app/dist/
+backend/static/dist/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+env/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.idea/
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/mcp.json
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Docker
+*.log
+
+# Task
+.task/
+
+# Teamwork ephemeral workspaces
+.agents/orchestrator_*/
+.agents/sentinel/
+.agents/teamwork_preview_*/
+.agents/ORIGINAL_REQUEST.md
+ORIGINAL_REQUEST.md

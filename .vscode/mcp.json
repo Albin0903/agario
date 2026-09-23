@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json.schemastore.org/mcp-config.json",
+  "mcpServers": {
+    "gopls": {
+      "command": "gopls",
+      "args": ["-mode=stdio"],
+      "description": "Go Language Server Protocol - inspection de types, diagnostics et refactoring"
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-puppeteer"],
+      "description": "Automatisation et inspection visuelle du navigateur (captures, logs, lighthouse)"
+    },
+    "fetch": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
+      "description": "Extraction et lecture de documentation web officielle (Go, Tailwind, TanStack)"
+    }
+  }
+}

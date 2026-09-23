@@ -1,0 +1,61 @@
+name: "Bug Report"
+description: Signaler une anomalie ou un dysfonctionnement technique
+title: "fix: "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Veuillez renseigner ce formulaire avec rigueur pour permettre une reproduction immediate.
+  - type: dropdown
+    id: component
+    attributes:
+      label: Composant affecte
+      multiple: true
+      options:
+        - "Backend Core (internal/core)"
+        - "Backend Adapters / HTTP (internal/adapters/httpserver)"
+        - "Frontend Templ / HTMX (internal/adapters/http/views)"
+        - "Frontend SPA / React (web-app)"
+        - "Tooling & Infra (Taskfile, Docker, CI/CD)"
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description du dysfonctionnement
+      placeholder: Exposez clairement le probleme rencontre et le contexte d'apparition...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Etapes de reproduction deterministes
+      placeholder: |
+        1. Executer 'task dev'
+        2. Effectuer une requete sur '...'
+        3. Constater l'erreur...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Comportement attendu
+      placeholder: Ce qui aurait du se produire conformement aux specifications...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Traces d'execution et logs
+      render: shell
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Verifications prealables
+      options:
+        - label: "J'ai verifie qu'aucun ticket similaire n'est deja ouvert"
+          required: true
+        - label: "L'erreur est reproductible via la commande Taskfile associee (ex: task check)"
+          required: false
+

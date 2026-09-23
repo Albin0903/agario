@@ -1,0 +1,10 @@
+{
+  "recommendations": [
+    "golang.go",
+    "a-h.templ",
+    "biomejs.biome",
+    "bradlc.vscode-tailwindcss",
+    "otovo-solar.htmx-tags",
+    "task.vscode-task"
+  ]
+}

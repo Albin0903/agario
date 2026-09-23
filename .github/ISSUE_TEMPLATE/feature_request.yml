@@ -1,0 +1,35 @@
+name: "Feature Request"
+description: Proposer une evolution technique, metier ou architecturale
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: dropdown
+    id: component
+    attributes:
+      label: Perimetre cible
+      options:
+        - "Backend Core (Domain / Ports / Logique)"
+        - "HTTP / Views (Templ + HTMX)"
+        - "SPA (TypeScript + React + TanStack)"
+        - "Tooling / CI / Taskfile / Docker"
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Contexte et besoin metier
+      description: Quelle contrainte technique ou opportunite fonctionnelle cette evolution resout-elle ?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Solution technique proposee
+      description: Detaillez les interfaces, structures de donnees, fragments ou composants prevus.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives envisagees ou rejetees
+
