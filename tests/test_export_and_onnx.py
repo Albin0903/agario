@@ -46,7 +46,7 @@ def test_onnx_export_and_benchmark(tmp_path):
     assert out_meta.shape == [1, 3], f"Expected [1, 3], got {out_meta.shape}"
 
     # 5. Verify numeric parity against PyTorch wrapper
-    wrapper = OnnxPolicyWrapper(model.policy)
+    wrapper = OnnxPolicyWrapper(model.policy.cpu())
     wrapper.eval()
 
     test_obs = np.random.uniform(-1.0, 1.0, size=(1, 84)).astype(np.float32)

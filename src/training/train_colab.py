@@ -13,6 +13,10 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+# Prevent tensorboard from hanging on heavy tensorflow load on Colab/Python 3.13
+sys.modules["tensorflow"] = None
+os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
+
 import argparse
 import yaml
 from typing import Callable, Optional, Dict, Any
