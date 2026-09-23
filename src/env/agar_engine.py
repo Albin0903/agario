@@ -90,7 +90,7 @@ class AgarEngine:
         self,
         width: float = 2000.0,
         height: float = 2000.0,
-        num_pellets: int = 500,
+        num_pellets: int = 1200,
         pellet_mass: float = 1.0,
         num_viruses: int = 10,
         virus_mass: float = 100.0,
@@ -102,10 +102,11 @@ class AgarEngine:
         radius_scale: float = 3.0,
         max_subcells: int = 16,
         remerge_cooldown_ticks: int = 300,
-        split_boost_speed: float = 16.0,
-        split_boost_decay: float = 0.85,
+        split_boost_speed: float = 24.0,
+        split_boost_decay: float = 0.90,
         eject_loss_mass: float = 16.0,
         eject_spawn_mass: float = 12.0,
+        mass_decay_rate: float = 0.0,
         spatial_cell_size: float = 100.0,
         seed: Optional[int] = None,
     ):
@@ -127,6 +128,7 @@ class AgarEngine:
         self.split_boost_decay = split_boost_decay
         self.eject_loss_mass = eject_loss_mass
         self.eject_spawn_mass = eject_spawn_mass
+        self.mass_decay_rate = mass_decay_rate
 
         self.rng = np.random.default_rng(seed)
         self.spatial_grid = SpatialHashGrid(self.width, self.height, cell_size=spatial_cell_size)
@@ -134,6 +136,8 @@ class AgarEngine:
         # Entity arrays
         self.pellets_xy: np.ndarray = np.zeros((num_pellets, 2), dtype=np.float32)
         self.viruses_xy: np.ndarray = np.zeros((num_viruses, 2), dtype=np.float32)
+        self.virus_masses: np.ndarray = np.full(num_viruses, self.virus_mass, dtype=np.float32)
+        self.virus_radii: np.ndarray = np.full(num_viruses, self.virus_radius, dtype=np.float32)
 
         # Active player cells: stored in structured lists for dynamic count
         # player_id -> list of Cell
@@ -147,19 +151,45 @@ class AgarEngine:
 
         self.reset(seed)
 
+    def _spawn_pellet_coords(self, count: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Generate pellet coordinates, deflecting any pellets near viruses into a rich outer halo."""
+        xs = self.rng.uniform(20.0, self.width - 20.0, size=count).astype(np.float32)
+        ys = self.rng.uniform(20.0, self.height - 20.0, size=count).astype(np.float32)
+
+        if self.num_viruses > 0 and len(self.viruses_xy) > 0:
+            thresh_sq = (self.virus_radius * 1.5) ** 2
+            for vx, vy in self.viruses_xy:
+                dx = xs - vx
+                dy = ys - vy
+                dist_sq = dx * dx + dy * dy
+                close_mask = dist_sq < thresh_sq
+                if np.any(close_mask):
+                    num_close = np.count_nonzero(close_mask)
+                    # Deflect into outer ring (1.2 to 2.4 * virus_radius)
+                    angles = self.rng.uniform(0.0, 2.0 * np.pi, size=num_close).astype(np.float32)
+                    halo_dist = self.rng.uniform(self.virus_radius * 1.2, self.virus_radius * 2.4, size=num_close).astype(np.float32)
+                    xs[close_mask] = np.clip(vx + np.cos(angles) * halo_dist, 20.0, self.width - 20.0)
+                    ys[close_mask] = np.clip(vy + np.sin(angles) * halo_dist, 20.0, self.height - 20.0)
+
+        return xs, ys
+
     def reset(self, seed: Optional[int] = None) -> None:
         """Reset simulation state, respawning pellets, viruses, and clearing cells."""
         if seed is not None:
             self.rng = np.random.default_rng(seed)
 
-        # Randomize pellets uniformly
-        self.pellets_xy[:, 0] = self.rng.uniform(20.0, self.width - 20.0, size=self.num_pellets)
-        self.pellets_xy[:, 1] = self.rng.uniform(20.0, self.height - 20.0, size=self.num_pellets)
-        self.spatial_grid.build(self.pellets_xy)
-
-        # Randomize viruses
+        # Randomize viruses first so pellets can cluster around them
+        self.viruses_xy = np.zeros((self.num_viruses, 2), dtype=np.float32)
         self.viruses_xy[:, 0] = self.rng.uniform(100.0, self.width - 100.0, size=self.num_viruses)
         self.viruses_xy[:, 1] = self.rng.uniform(100.0, self.height - 100.0, size=self.num_viruses)
+        self.virus_masses = np.full(self.num_viruses, self.virus_mass, dtype=np.float32)
+        self.virus_radii = np.full(self.num_viruses, self.virus_radius, dtype=np.float32)
+
+        # Randomize pellets with virus halos
+        px, py = self._spawn_pellet_coords(self.num_pellets)
+        self.pellets_xy[:, 0] = px
+        self.pellets_xy[:, 1] = py
+        self.spatial_grid.build(self.pellets_xy)
 
         self.cells.clear()
         self.ejected.clear()
@@ -397,10 +427,37 @@ class AgarEngine:
             else:
                 target_dir_x, target_dir_y = 0.0, 0.0
 
-            spd = cell.speed
+            spd = mass_to_speed(cell.mass, v_base=self.v_base, v_min=self.v_min)
             cell.vx = target_dir_x * spd
             cell.vy = target_dir_y * spd
 
+            # Apply slow mass decay for cells above min mass
+            if self.mass_decay_rate > 0.0 and cell.mass > 20.0:
+                decay = cell.mass * self.mass_decay_rate
+                cell.mass = max(20.0, cell.mass - decay)
+
+        # Natural centroid attraction when stationary / idle (subcells rejoin smoothly)
+        for pid in unique_players:
+            p_cells = self.get_player_cells(pid)
+            if len(p_cells) > 1:
+                act = actions.get(pid, None)
+                is_idle = True
+                if act is not None and len(act) >= 2:
+                    if math.hypot(float(act[0]), float(act[1])) > 0.05:
+                        is_idle = False
+                if is_idle:
+                    cx = sum(c.x for c in p_cells) / len(p_cells)
+                    cy = sum(c.y for c in p_cells) / len(p_cells)
+                    for c in p_cells:
+                        cdx = cx - c.x
+                        cdy = cy - c.y
+                        cdist = math.hypot(cdx, cdy)
+                        if cdist > 2.0:
+                            pull = min(2.5, cdist * 0.08)
+                            c.vx += (cdx / cdist) * pull
+                            c.vy += (cdy / cdist) * pull
+
+        for cell in self.cells:
             # Apply and decay split boost
             vx_total = cell.vx + cell.boost_vx
             vy_total = cell.vy + cell.boost_vy
@@ -508,14 +565,25 @@ class AgarEngine:
                                 merged_ids.add(ci.id)
                                 break
                         else:
-                            # Elastic soft push apart
-                            overlap = (r_sum - dist) * 0.5
+                            # Elastic soft push apart to maintain separation while unmerged
+                            overlap = (r_sum - dist) * 0.6
                             nx = dx / dist
                             ny = dy / dist
                             ci.x = float(np.clip(ci.x - nx * overlap, ci.radius, self.width - ci.radius))
                             ci.y = float(np.clip(ci.y - ny * overlap, ci.radius, self.height - ci.radius))
                             cj.x = float(np.clip(cj.x + nx * overlap, cj.radius, self.width - cj.radius))
                             cj.y = float(np.clip(cj.y + ny * overlap, cj.radius, self.height - cj.radius))
+                    elif ci.remerge_cooldown == 0 and cj.remerge_cooldown == 0:
+                        # Magnetic attraction force when remerge cooldown has expired
+                        dist = math.sqrt(max(1e-6, dist_sq))
+                        if dist < (r_sum * 2.5):
+                            pull = 1.0 * (1.0 - dist / (r_sum * 2.5))
+                            nx = dx / dist
+                            ny = dy / dist
+                            ci.x = float(np.clip(ci.x + nx * pull, ci.radius, self.width - ci.radius))
+                            ci.y = float(np.clip(ci.y + ny * pull, ci.radius, self.height - ci.radius))
+                            cj.x = float(np.clip(cj.x - nx * pull, cj.radius, self.width - cj.radius))
+                            cj.y = float(np.clip(cj.y - ny * pull, cj.radius, self.height - cj.radius))
 
             for c in p_cells:
                 if c.id not in merged_ids:
@@ -552,37 +620,78 @@ class AgarEngine:
                 self.step_events[cell.player_id]["pellets_eaten"] += num_eaten
                 pellets_respawn_idx.extend(eaten_indices.tolist())
 
-        # Vectorized instant respawn of eaten pellets
+        # Vectorized instant respawn of eaten pellets with virus halo clustering
         if pellets_respawn_idx:
             unique_respawn = np.unique(pellets_respawn_idx)
-            new_x = self.rng.uniform(20.0, self.width - 20.0, size=len(unique_respawn))
-            new_y = self.rng.uniform(20.0, self.height - 20.0, size=len(unique_respawn))
+            new_x, new_y = self._spawn_pellet_coords(len(unique_respawn))
             self.pellets_xy[unique_respawn, 0] = new_x
             self.pellets_xy[unique_respawn, 1] = new_y
             for idx, nx, ny in zip(unique_respawn, new_x, new_y):
                 self.spatial_grid.update_pellet(int(idx), float(nx), float(ny))
 
     def _resolve_ejected_collisions(self) -> None:
-        """Resolve consumption of ejected mass fragments by cells."""
-        if not self.ejected or not self.cells:
+        """Resolve consumption of ejected mass fragments by cells and viruses."""
+        if not self.ejected:
             return
 
         ejected_xy = np.array([[em.x, em.y] for em in self.ejected], dtype=np.float32)
         surviving_ejected: List[EjectedMass] = []
         eaten_ejected_indices = set()
 
-        for cell in self.cells:
-            dx = ejected_xy[:, 0] - cell.x
-            dy = ejected_xy[:, 1] - cell.y
-            dists_sq = dx * dx + dy * dy
-            r_sq = cell.radius * cell.radius
+        # 1. Cells eat ejected mass
+        if self.cells:
+            for cell in self.cells:
+                dx = ejected_xy[:, 0] - cell.x
+                dy = ejected_xy[:, 1] - cell.y
+                dists_sq = dx * dx + dy * dy
+                r_sq = cell.radius * cell.radius
 
-            eaten = np.where(dists_sq < r_sq)[0]
-            for idx in eaten:
-                if idx not in eaten_ejected_indices:
-                    eaten_ejected_indices.add(idx)
-                    cell.mass += self.ejected[idx].mass
-                    self.step_events[cell.player_id]["ejected_mass_eaten"] += 1
+                eaten = np.where(dists_sq < r_sq)[0]
+                for idx in eaten:
+                    if idx not in eaten_ejected_indices:
+                        eaten_ejected_indices.add(idx)
+                        cell.mass += self.ejected[idx].mass
+                        self.step_events[cell.player_id]["ejected_mass_eaten"] += 1
+
+        # 2. Viruses eat ejected mass (feed virus to make it grow and shoot)
+        if len(self.viruses_xy) > 0:
+            new_viruses_to_add = []
+            for v_idx in range(len(self.viruses_xy)):
+                vx, vy = self.viruses_xy[v_idx]
+                vr = self.virus_radii[v_idx]
+                dx = ejected_xy[:, 0] - vx
+                dy = ejected_xy[:, 1] - vy
+                dists_sq = dx * dx + dy * dy
+                v_r_sq = vr * vr
+
+                eaten = np.where(dists_sq < v_r_sq)[0]
+                for idx in eaten:
+                    if idx not in eaten_ejected_indices:
+                        eaten_ejected_indices.add(idx)
+                        self.virus_masses[v_idx] += self.ejected[idx].mass
+                        self.virus_radii[v_idx] = mass_to_radius(self.virus_masses[v_idx], scale=self.radius_scale)
+                        # Check threshold to shoot a new virus
+                        if self.virus_masses[v_idx] >= 140.0:
+                            self.virus_masses[v_idx] = 100.0
+                            self.virus_radii[v_idx] = self.virus_radius
+                            em = self.ejected[idx]
+                            em_spd = math.hypot(em.vx, em.vy)
+                            if em_spd > 1e-4:
+                                shoot_dx = em.vx / em_spd
+                                shoot_dy = em.vy / em_spd
+                            else:
+                                shoot_dx, shoot_dy = 1.0, 0.0
+
+                            nvx = float(np.clip(vx + shoot_dx * 200.0, 50.0, self.width - 50.0))
+                            nvy = float(np.clip(vy + shoot_dy * 200.0, 50.0, self.height - 50.0))
+                            new_viruses_to_add.append((nvx, nvy))
+
+            if new_viruses_to_add:
+                new_arr = np.array(new_viruses_to_add, dtype=np.float32)
+                self.viruses_xy = np.vstack([self.viruses_xy, new_arr])
+                self.virus_masses = np.append(self.virus_masses, np.full(len(new_viruses_to_add), 100.0, dtype=np.float32))
+                self.virus_radii = np.append(self.virus_radii, np.full(len(new_viruses_to_add), self.virus_radius, dtype=np.float32))
+                self.num_viruses = len(self.viruses_xy)
 
         for idx, em in enumerate(self.ejected):
             if idx not in eaten_ejected_indices:

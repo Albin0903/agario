@@ -5,6 +5,12 @@ from dataclasses import dataclass, field
 import math
 
 
+DEFAULT_MASS_DECAY_RATE: float = 0.0004  # ~1% mass loss every ~25 ticks over min mass
+MIN_DECAY_MASS: float = 20.0
+SPLIT_IMPULSE_SPEED: float = 24.0
+SPLIT_DRAG: float = 0.90
+
+
 def mass_to_radius(mass: float, scale: float = 3.0) -> float:
     """Calculate cell radius from mass: r = sqrt(m) * scale."""
     m = mass if mass > 1.0 else 1.0

@@ -10,7 +10,7 @@ import math
 import numpy as np
 import pytest
 from src.env.agar_engine import AgarEngine
-from src.env.entities import mass_to_radius, mass_to_speed
+from src.env.entities import mass_to_radius, mass_to_speed, Cell, EjectedMass
 
 
 def test_mass_radius_formula():
@@ -179,4 +179,62 @@ def test_simulation_speed_benchmark():
     fps = steps / (t1 - t0)
     print(f"\n[FPS Benchmark] Raw engine achieved: {fps:.1f} FPS")
     assert fps >= 5000.0, f"Expected FPS >= 5000, got {fps:.1f}"
+
+
+def test_virus_feeding_and_shoot():
+    """Verify feeding a virus with ejected mass causes it to grow and shoot a new virus at 140 mass."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=1)
+    engine.viruses_xy[0] = [500.0, 500.0]
+    initial_virus_count = len(engine.viruses_xy)
+
+    # Spawn 4 ejected mass pieces right on the virus to feed it (each is 12 mass: 100 + 4*12 = 148 >= 140)
+    for i in range(4):
+        em = EjectedMass(
+            id=i + 1,
+            player_id=0,
+            x=500.0,
+            y=500.0,
+            vx=10.0,
+            vy=0.0,
+            mass=12.0,
+            radius=10.0,
+            ticks_remaining=10,
+        )
+        engine.ejected.append(em)
+
+    engine.step({})
+
+    # Virus should have shot a new virus!
+    assert len(engine.viruses_xy) == initial_virus_count + 1
+    # Original virus mass should be reset to 100
+    assert engine.virus_masses[0] == 100.0
+
+
+def test_subcells_idle_centroid_attraction():
+    """Verify separated sub-cells drift towards their center of mass when idle."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0)
+    c1 = engine.spawn_player(0, initial_mass=50.0, xy=(450.0, 500.0))
+    c2 = Cell(id=engine._next_cell_id, player_id=0, x=550.0, y=500.0, mass=50.0, remerge_cooldown=300)
+    engine._next_cell_id += 1
+    engine.cells.append(c2)
+
+    initial_dist = abs(c2.x - c1.x)
+    # Step with idle action
+    engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+
+    new_dist = abs(c2.x - c1.x)
+    # Distance between subcells should have decreased due to centroid attraction
+    assert new_dist < initial_dist
+
+
+def test_virus_halo_spawning():
+    """Verify pellets near viruses are displaced into outer halos."""
+    engine = AgarEngine(width=2000.0, height=2000.0, num_pellets=1200, num_viruses=10)
+    for vx, vy in engine.viruses_xy:
+        dx = engine.pellets_xy[:, 0] - vx
+        dy = engine.pellets_xy[:, 1] - vy
+        dists = np.hypot(dx, dy)
+        # No pellets should be buried under the virus core (< 25 radius)
+        assert np.all(dists >= 25.0)
+
 

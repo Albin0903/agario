@@ -62,8 +62,16 @@ class AgarGameVisualizer:
         self.font_large = pygame.font.SysFont("Arial", 28, bold=True)
         self.font_small = pygame.font.SysFont("Arial", 12)
 
-        # Initialize engine
-        self.engine = AgarEngine(width=2000.0, height=2000.0, num_pellets=500, num_viruses=10)
+        # Initialize engine with authentic Agar.io physics (dynamic speed, mass decay, high density)
+        self.engine = AgarEngine(
+            width=2000.0,
+            height=2000.0,
+            num_pellets=1200,
+            num_viruses=10,
+            v_base=3.2,
+            v_min=0.8,
+            mass_decay_rate=0.0003,
+        )
         self.human_id = 0
         self.num_bots = num_bots
 
@@ -216,10 +224,12 @@ class AgarGameVisualizer:
             r = max(3, int(em.radius * self.cam_zoom))
             pygame.draw.circle(self.screen, (100, 100, 100), (sx, sy), r)
 
-        # Draw Viruses (spiky outline)
-        for vx, vy in self.engine.viruses_xy:
+        # Draw Viruses (spiky outline, dynamic radii)
+        for v_idx in range(len(self.engine.viruses_xy)):
+            vx, vy = self.engine.viruses_xy[v_idx]
+            vr = self.engine.virus_radii[v_idx] if v_idx < len(self.engine.virus_radii) else self.engine.virus_radius
             sx, sy = self._world_to_screen(vx, vy)
-            r = max(6, int(self.engine.virus_radius * self.cam_zoom))
+            r = max(6, int(vr * self.cam_zoom))
             # Spiky circle points
             pts = []
             num_spikes = 16
@@ -301,6 +311,60 @@ class AgarGameVisualizer:
             dead_txt = "YOU DIED! Press 'R' to Respawn"
             dead_lbl = self.font_large.render(dead_txt, True, (220, 40, 40))
             self.screen.blit(dead_lbl, (15, self.screen_height - 45))
+
+        # Render Radar Minimap in bottom-right corner
+        map_size = 180
+        map_x = self.screen_width - map_size - 15
+        map_y = self.screen_height - map_size - 15
+
+        map_surf = pygame.Surface((map_size, map_size), pygame.SRCALPHA)
+        map_surf.fill((15, 20, 32, 215))
+
+        scale_x = map_size / self.engine.width
+        scale_y = map_size / self.engine.height
+
+        # Grid lines in minimap
+        pygame.draw.line(map_surf, (40, 50, 70), (map_size // 2, 0), (map_size // 2, map_size), 1)
+        pygame.draw.line(map_surf, (40, 50, 70), (0, map_size // 2), (map_size, map_size // 2), 1)
+
+        # Draw viruses (green dots)
+        for vx, vy in self.engine.viruses_xy:
+            mx = int(vx * scale_x)
+            my = int(vy * scale_y)
+            pygame.draw.circle(map_surf, (50, 205, 50), (mx, my), 3)
+
+        # Draw opponent bots (red/colored dots)
+        for cell in self.engine.cells:
+            if cell.player_id != self.human_id:
+                mx = int(cell.x * scale_x)
+                my = int(cell.y * scale_y)
+                dot_r = max(2, min(6, int(cell.radius * scale_x)))
+                pygame.draw.circle(map_surf, (220, 80, 80), (mx, my), dot_r)
+
+        # Draw camera viewport rectangle
+        cam_w_world = self.screen_width / self.cam_zoom
+        cam_h_world = self.screen_height / self.cam_zoom
+        view_x = int((self.cam_x - cam_w_world / 2) * scale_x)
+        view_y = int((self.cam_y - cam_h_world / 2) * scale_y)
+        view_w = max(4, int(cam_w_world * scale_x))
+        view_h = max(4, int(cam_h_world * scale_y))
+        pygame.draw.rect(map_surf, (255, 255, 255, 120), (view_x, view_y, view_w, view_h), 1)
+
+        # Draw human player cells (bright yellow dots with white border)
+        human_cells = self.engine.get_player_cells(self.human_id)
+        for cell in human_cells:
+            mx = int(cell.x * scale_x)
+            my = int(cell.y * scale_y)
+            dot_r = max(3, min(8, int(cell.radius * scale_x)))
+            pygame.draw.circle(map_surf, (255, 230, 0), (mx, my), dot_r)
+            pygame.draw.circle(map_surf, (255, 255, 255), (mx, my), dot_r + 1, 1)
+
+        # Minimap border & title
+        pygame.draw.rect(map_surf, (90, 110, 140), (0, 0, map_size, map_size), 2)
+        map_title = self.font_small.render("ARENA MAP", True, (160, 175, 200))
+        map_surf.blit(map_title, (8, 6))
+
+        self.screen.blit(map_surf, (map_x, map_y))
 
 
 def main():

@@ -87,6 +87,23 @@ class HeuristicBot:
                 return np.array([prey_vec[0], prey_vec[1], 0.8], dtype=np.float32)
             return np.array([prey_vec[0], prey_vec[1], -1.0], dtype=np.float32)
 
+        # Check for nearby ejected mass (tempting bait / food)
+        if engine.ejected:
+            closest_feed_dist = float("inf")
+            feed_dir = np.zeros(2, dtype=np.float32)
+            for em in engine.ejected:
+                em_dx = em.x - cx
+                em_dy = em.y - cy
+                em_dist = math.hypot(em_dx, em_dy)
+                if em_dist < min(view_r, 450.0) and em_dist < closest_feed_dist:
+                    closest_feed_dist = em_dist
+                    feed_dir[0] = em_dx / max(1e-4, em_dist)
+                    feed_dir[1] = em_dy / max(1e-4, em_dist)
+
+            if closest_feed_dist < min(view_r, 400.0):
+                # Move toward feed (baiting / feeding works!)
+                return np.array([feed_dir[0], feed_dir[1], -1.0], dtype=np.float32)
+
         # Otherwise forage closest pellet
         cand = engine.spatial_grid.query_circle(cx, cy, min(view_r, 300.0))
         if cand:
@@ -146,7 +163,7 @@ class AgarEnv(gym.Env):
         self.engine = AgarEngine(
             width=self.width,
             height=self.height,
-            num_pellets=int(cfg.get("entities", {}).get("num_pellets", 500)),
+            num_pellets=int(cfg.get("entities", {}).get("num_pellets", 1200)),
             pellet_mass=float(cfg.get("entities", {}).get("pellet_mass", 1.0)),
             num_viruses=int(cfg.get("entities", {}).get("num_viruses", 10)),
             virus_mass=float(cfg.get("entities", {}).get("virus_mass", 100.0)),
@@ -158,10 +175,11 @@ class AgarEnv(gym.Env):
             radius_scale=float(cfg.get("physics", {}).get("radius_scale", 3.0)),
             max_subcells=int(cfg.get("physics", {}).get("max_subcells", 16)),
             remerge_cooldown_ticks=int(cfg.get("physics", {}).get("remerge_cooldown_ticks", 300)),
-            split_boost_speed=float(cfg.get("physics", {}).get("split_boost_speed", 16.0)),
-            split_boost_decay=float(cfg.get("physics", {}).get("split_boost_decay", 0.85)),
+            split_boost_speed=float(cfg.get("physics", {}).get("split_boost_speed", 24.0)),
+            split_boost_decay=float(cfg.get("physics", {}).get("split_boost_decay", 0.90)),
             eject_loss_mass=float(cfg.get("physics", {}).get("eject_loss_mass", 16.0)),
             eject_spawn_mass=float(cfg.get("physics", {}).get("eject_spawn_mass", 12.0)),
+            mass_decay_rate=float(cfg.get("physics", {}).get("mass_decay_rate", 0.0004)),
             spatial_cell_size=float(sim_cfg.get("spatial_grid_cell_size", 100.0)),
             seed=seed,
         )
