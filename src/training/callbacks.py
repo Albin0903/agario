@@ -39,6 +39,7 @@ class SelfPlayCallback(BaseCallback):
         self.rolling_lengths = deque(maxlen=100)
 
         os.makedirs(self.save_dir, exist_ok=True)
+        self.pool.sync_from_disk()
 
     def _on_step(self) -> bool:
         # Extract environment step information
@@ -62,6 +63,7 @@ class SelfPlayCallback(BaseCallback):
         # Log rolling statistics
         if (self.num_timesteps - self.last_log_step) >= self.log_interval_steps:
             self.last_log_step = self.num_timesteps
+            self.pool.sync_from_disk()
             avg_mass = float(np.mean(self.rolling_masses)) if self.rolling_masses else 0.0
             avg_rew = float(np.mean(self.rolling_rewards)) if self.rolling_rewards else 0.0
             avg_eaten = float(np.mean(self.rolling_cells_eaten)) if self.rolling_cells_eaten else 0.0

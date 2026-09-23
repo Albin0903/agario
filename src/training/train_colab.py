@@ -17,6 +17,9 @@ if ROOT_DIR not in sys.path:
 sys.modules["tensorflow"] = None
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="stable_baselines3")
+
 import argparse
 import yaml
 from typing import Callable, Optional, Dict, Any
@@ -135,6 +138,7 @@ def main():
         heuristic_ratio=float(ppo_cfg.get("self_play", {}).get("heuristic_opponent_ratio", 0.3)),
         device=device,
     )
+    pool.sync_from_disk()
 
     # Build Vectorized Environments
     env_fns = [make_env_fn(rank=i, env_config=env_cfg, pool=pool, seed=args.seed) for i in range(args.n_envs)]
