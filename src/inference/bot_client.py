@@ -69,8 +69,18 @@ class AgarBotClient:
         self.last_action_time = 0.0
         self.action_interval = 0.04  # 25 Hz control loop
 
-    def _init_onnx(self, model_path: str) -> None:
+    def _init_onnx(self, model_path: Optional[str]) -> None:
         """Load and prepare ONNX Runtime session."""
+        if model_path is None or model_path == "mock":
+            class _MockSession:
+                def run(self, *args, **kwargs):
+                    return [np.zeros((1, 3), dtype=np.float32)]
+            self.session = _MockSession()
+            self.input_name = "observation"
+            if self.verbose:
+                print("[BotClient] Initialized with mock inference session.")
+            return
+
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"ONNX model file not found at: {model_path}")
 

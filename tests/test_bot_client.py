@@ -13,24 +13,8 @@ from src.inference.bot_client import AgarBotClient, OgarNode
 
 @pytest.fixture
 def bot_client():
-    onnx_path = os.path.join(ROOT_DIR, "models", "model.onnx")
-    if not os.path.exists(onnx_path):
-        os.makedirs(os.path.dirname(onnx_path), exist_ok=True)
-        import torch
-        import torch.nn as nn
-        dummy = nn.Sequential(nn.Linear(84, 3), nn.Tanh())
-        dummy_in = torch.zeros((1, 84), dtype=torch.float32)
-        torch.onnx.export(
-            dummy,
-            dummy_in,
-            onnx_path,
-            input_names=["observation"],
-            output_names=["action"],
-            opset_version=17,
-        )
-
     return AgarBotClient(
-        onnx_model_path=onnx_path,
+        onnx_model_path="mock",
         server_url="ws://127.0.0.1:443",
         bot_name="TestBot",
         verbose=False,
