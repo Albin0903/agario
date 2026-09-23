@@ -1,0 +1,177 @@
+"""Unit tests for the Agar.io simulation physics engine and mass conservation."""
+
+import time
+import math
+import numpy as np
+import pytest
+from src.env.agar_engine import AgarEngine
+from src.env.entities import mass_to_radius, mass_to_speed
+
+
+def test_mass_radius_formula():
+    """Verify r = sqrt(m) * 3."""
+    for m in [1.0, 4.0, 9.0, 16.0, 100.0, 400.0]:
+        expected = math.sqrt(m) * 3.0
+        assert math.isclose(mass_to_radius(m), expected, rel_tol=1e-5)
+
+
+def test_mass_speed_formula():
+    """Verify v = max(0.5, 2.0 * m^(-0.2))."""
+    # Mass 1: 2.0 * 1 = 2.0
+    assert math.isclose(mass_to_speed(1.0), 2.0, rel_tol=1e-5)
+    # Mass 32: 2.0 * 32^(-0.2) = 2.0 * 0.5 = 1.0
+    assert math.isclose(mass_to_speed(32.0), 1.0, rel_tol=1e-3)
+    # Very high mass should clamp to 0.5
+    assert mass_to_speed(100000.0) == 0.5
+
+
+def test_pellet_consumption_and_mass_conservation():
+    """Verify mass conservation upon eating pellets."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=100, pellet_mass=1.0)
+    player = engine.spawn_player(0, initial_mass=20.0, xy=(500.0, 500.0))
+
+    # Place 5 pellets directly inside the player's radius
+    for i in range(5):
+        engine.pellets_xy[i] = [500.0 + i, 500.0 + i]
+    engine.spatial_grid.build(engine.pellets_xy)
+
+    # Step with idle action
+    engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+
+    # Player mass should have increased by at least 5
+    assert engine.get_player_mass(0) >= 25.0
+
+
+def test_cell_predation_mass_conservation():
+    """Verify predator absorbs prey and total mass transfers accurately."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0)
+    # Predator (mass 100) and Prey (mass 50) overlapping
+    predator = engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
+    prey = engine.spawn_player(1, initial_mass=50.0, xy=(505.0, 500.0))
+
+    # Check that predator eats prey (100 >= 1.1 * 50 = 55)
+    events = engine.step({
+        0: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+        1: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+    })
+
+    assert events[0]["cells_eaten"] == 1
+    assert events[1]["died"] is True
+    # Mass conservation: 100 + 50 = 150
+    assert math.isclose(engine.get_player_mass(0), 150.0, rel_tol=1e-5)
+    assert len(engine.get_player_cells(1)) == 0
+
+
+def test_predation_requires_eat_ratio():
+    """Verify cells do not eat each other if mass ratio < 1.1."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0)
+    # Cell A mass 100, Cell B mass 95 (100 < 1.1 * 95 = 104.5)
+    cA = engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
+    cB = engine.spawn_player(1, initial_mass=95.0, xy=(505.0, 500.0))
+
+    events = engine.step({
+        0: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+        1: np.array([0.0, 0.0, -1.0], dtype=np.float32),
+    })
+
+    assert events[0]["cells_eaten"] == 0
+    assert events[1]["died"] is False
+    assert len(engine.cells) == 2
+
+
+def test_virus_explosion():
+    """Verify cells with mass > 130 explode into fragments when colliding with a virus."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=1)
+    engine.viruses_xy[0] = [500.0, 500.0]
+
+    # Spawn cell with mass 200 directly covering the virus
+    cell = engine.spawn_player(0, initial_mass=200.0, xy=(500.0, 500.0))
+    assert len(engine.get_player_cells(0)) == 1
+
+    engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+
+    p_cells = engine.get_player_cells(0)
+    assert len(p_cells) > 1
+    assert len(p_cells) <= 16
+    # Total mass must be conserved (200.0)
+    total_mass = sum(c.mass for c in p_cells)
+    assert math.isclose(total_mass, 200.0, rel_tol=1e-4)
+
+
+def test_split_action():
+    """Verify split divides cell into two equal halves with impulse."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0)
+    cell = engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
+
+    # Trigger split towards right (tx=1.0, ty=0.0, trigger=0.8)
+    events = engine.step({0: np.array([1.0, 0.0, 0.8], dtype=np.float32)})
+
+    assert events[0]["splits"] == 1
+    p_cells = engine.get_player_cells(0)
+    assert len(p_cells) == 2
+    assert math.isclose(p_cells[0].mass, 50.0, rel_tol=1e-5)
+    assert math.isclose(p_cells[1].mass, 50.0, rel_tol=1e-5)
+    assert p_cells[0].remerge_cooldown > 0
+    assert p_cells[1].remerge_cooldown > 0
+
+
+def test_eject_mass_action():
+    """Verify mass ejection deducts 16 mass and spawns 12 mass pellet."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0)
+    cell = engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
+
+    # Trigger eject mass towards right (trigger = 0.0 is in [-0.33, 0.33])
+    events = engine.step({0: np.array([1.0, 0.0, 0.0], dtype=np.float32)})
+
+    assert events[0]["ejects"] == 1
+    assert math.isclose(cell.mass, 84.0, rel_tol=1e-5)
+    assert len(engine.ejected) == 1
+    assert math.isclose(engine.ejected[0].mass, 12.0, rel_tol=1e-5)
+
+
+def test_subcells_remerge():
+    """Verify sub-cells remerge after cooldown expires."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, remerge_cooldown_ticks=2)
+    engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
+
+    # Split
+    engine.step({0: np.array([1.0, 0.0, 0.8], dtype=np.float32)})
+    assert len(engine.get_player_cells(0)) == 2
+
+    # Step until cooldown expires
+    for _ in range(5):
+        # Force subcells to stay close
+        p_cells = engine.get_player_cells(0)
+        if len(p_cells) == 2:
+            p_cells[1].x = p_cells[0].x + 2.0
+            p_cells[1].y = p_cells[0].y
+        engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+
+    # After cooldown expires, they should merge back into 1 cell of mass 100
+    p_cells = engine.get_player_cells(0)
+    assert len(p_cells) == 1
+    assert math.isclose(p_cells[0].mass, 100.0, rel_tol=1e-4)
+
+
+def test_simulation_speed_benchmark():
+    """Verify headless simulation achieves > 5000 FPS."""
+    engine = AgarEngine(width=2000.0, height=2000.0, num_pellets=500, num_viruses=10)
+    for i in range(11):
+        engine.spawn_player(i, initial_mass=20.0)
+
+    actions = {i: np.array([1.0, 0.0, -1.0], dtype=np.float32) for i in range(11)}
+
+    # Warmup
+    for _ in range(100):
+        engine.step(actions)
+
+    steps = 5000
+    t0 = time.perf_counter()
+    for _ in range(steps):
+        engine.step(actions)
+    t1 = time.perf_counter()
+
+    fps = steps / (t1 - t0)
+    print(f"\n[FPS Benchmark] Raw engine achieved: {fps:.1f} FPS")
+    assert fps >= 5000.0, f"Expected FPS >= 5000, got {fps:.1f}"
+

@@ -1,0 +1,52 @@
+# AGAR-RL Environment Configuration
+
+arena:
+  width: 2000.0
+  height: 2000.0
+
+physics:
+  v_base: 2.0
+  v_min: 0.5
+  v_mass_exponent: -0.2
+  radius_scale: 3.0          # r = sqrt(m) * 3
+  eat_ratio: 1.1             # m_A >= 1.1 * m_B to consume
+  initial_player_mass: 20.0
+  min_cell_mass: 10.0
+  max_subcells: 16
+  remerge_cooldown_ticks: 300
+  split_boost_speed: 16.0
+  split_boost_decay: 0.85
+  eject_loss_mass: 16.0
+  eject_spawn_mass: 12.0
+  eject_speed: 18.0
+
+entities:
+  num_pellets: 500
+  pellet_mass: 1.0
+  num_viruses: 10
+  virus_mass: 100.0
+  virus_radius: 30.0
+  virus_split_threshold: 130.0
+
+observation:
+  view_radius_base: 500.0
+  view_radius_scale: 2.0     # R_vue = 500 + 2 * r_c
+  num_pellets_obs: 10        # 10 * 2 = 20 floats
+  num_prey_obs: 5            # 5 * 4 = 20 floats
+  num_predator_obs: 5        # 5 * 4 = 20 floats
+  num_virus_obs: 4           # 4 * 3 = 12 floats
+  total_dims: 84
+
+rewards:
+  mass_scale: 1.0
+  eat_cell_reward: 5.0
+  death_penalty: -10.0
+  inefficient_split_penalty: -0.5
+  split_eval_window: 30
+  survival_reward: 0.001
+
+simulation:
+  max_steps: 1000
+  num_bots: 10
+  spatial_grid_cell_size: 100.0
+

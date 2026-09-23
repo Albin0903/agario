@@ -1,0 +1,36 @@
+# AGAR-RL PPO & Self-Play Configuration
+
+ppo:
+  learning_rate: 0.0003
+  n_steps: 2048
+  batch_size: 128
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_range: 0.2
+  clip_range_vf: null
+  normalize_advantage: true
+  ent_coef: 0.005
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  total_timesteps: 10000000
+
+policy:
+  net_arch:
+    pi: [256, 256]
+    vf: [256, 256]
+  activation_fn: "ReLU"
+
+self_play:
+  update_interval_steps: 500000
+  max_pool_size: 10
+  history_dir: "checkpoints/self_play_pool"
+  save_dir: "checkpoints/ppo"
+  heuristic_opponent_ratio: 0.3
+
+training:
+  n_envs: 16
+  eval_freq: 20000
+  eval_episodes: 5
+  seed: 42
+
