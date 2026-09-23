@@ -115,17 +115,30 @@ cd agar-ai
 # Créer un environnement virtuel et installer les dépendances
 uv venv --python 3.11 .venv
 source .venv/bin/activate  # Sous Windows: .venv\Scripts\activate
-uv pip install -r requirements.txt
+uv pip install -r requirements.txt pygame
 ```
 
 ---
 
-## 4. Entraînement PPO & Self-Play (`src/training/`)
+## 4. Tester et Jouer Immédiatement en Mode Visuel 🎮
 
-Le script `src/training/train_colab.py` est autonome et s'exécute aussi bien localement que sur Google Colab avec GPU :
+Vous pouvez tester l'environnement en direct avec rendu visuel 60 FPS, caméra fluide et leaderboard en affrontant des bots ou l'IA entraînée :
 
 ```bash
-# Entraînement multi-environnements distribué
+# Lancer le jeu interactif (Souris = Direction, Espace = Split, W = Ejecter masse, R = Respawn)
+python play_human.py --model models/model.onnx --bots 10
+```
+
+---
+
+## 5. Entraînement PPO & Self-Play (`src/training/`)
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Albin0903/agario/blob/main/notebooks/train_colab.ipynb)
+
+Vous pouvez lancer l'entraînement directement sur **Google Colab** via le notebook [`notebooks/train_colab.ipynb`](notebooks/train_colab.ipynb) en un clic avec accélération GPU, ou en local :
+
+```bash
+# Entraînement multi-environnements distribué (16 instances en parallèle)
 python src/training/train_colab.py --n-envs 16 --total-timesteps 10000000
 
 # Entraînement local de test rapide
