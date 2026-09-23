@@ -156,6 +156,7 @@ class AgarEnv(gym.Env):
         self.inefficient_split_penalty = float(rewards_cfg.get("inefficient_split_penalty", 0.0))
         self.split_eval_window = int(rewards_cfg.get("split_eval_window", 30))
         self.survival_reward = float(rewards_cfg.get("survival_reward", 0.001))
+        self.proximity_pellet_reward = float(rewards_cfg.get("proximity_pellet_reward", 0.0))
 
         self.initial_player_mass = float(cfg.get("physics", {}).get("initial_player_mass", 20.0))
         self.v_base = float(cfg.get("physics", {}).get("v_base", 2.0))
@@ -235,6 +236,7 @@ class AgarEnv(gym.Env):
         self.prev_mass = self.initial_player_mass
         self.active_splits.clear()
         self.total_cells_eaten = 0
+        self.prev_nearest_pellet_dist = 0.0  # Will be computed on first step
 
         obs = self._build_observation()
         info = {
@@ -306,7 +308,25 @@ class AgarEnv(gym.Env):
         r_split_penalty = float(inefficient_splits) * abs(self.inefficient_split_penalty)
         r_survival = self.survival_reward
 
-        reward = float(r_mass * self.mass_scale + r_pellet + r_hunt + r_death - r_split_penalty + r_survival)
+        # Proximity-to-pellet reward: dense signal for approaching food
+        r_proximity = 0.0
+        if self.proximity_pellet_reward > 0 and not died and len(learning_cells) > 0:
+            cx, cy, _ = self.engine.get_player_centroid(self.learning_player_id)
+            cand = self.engine.spatial_grid.query_circle(cx, cy, 300.0)
+            if cand:
+                p_xy = self.engine.pellets_xy[cand]
+                dists = np.hypot(p_xy[:, 0] - cx, p_xy[:, 1] - cy)
+                nearest_dist = float(np.min(dists))
+            else:
+                nearest_dist = 300.0
+
+            if self.prev_nearest_pellet_dist > 0:
+                # Reward for closing distance (positive when getting closer)
+                delta = self.prev_nearest_pellet_dist - nearest_dist
+                r_proximity = float(np.clip(delta / 50.0, -0.5, 0.5)) * self.proximity_pellet_reward
+            self.prev_nearest_pellet_dist = nearest_dist
+
+        reward = float(r_mass * self.mass_scale + r_pellet + r_hunt + r_death - r_split_penalty + r_survival + r_proximity)
 
         self.prev_mass = current_mass
 

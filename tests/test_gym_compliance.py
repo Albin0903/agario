@@ -54,7 +54,7 @@ def test_reward_mechanisms():
     env.engine.spawn_player(99, initial_mass=500.0, xy=(env.engine.cells[0].x, env.engine.cells[0].y))
     obs, reward, terminated, truncated, info = env.step(action)
     assert terminated is True
-    assert reward <= -9.0  # Death penalty of -10.0
+    assert reward <= -5.0  # Death penalty should be strongly negative
 
 
 def test_seed_reproducibility():

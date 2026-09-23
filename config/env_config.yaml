@@ -41,16 +41,17 @@ observation:
   total_dims: 84
 
 rewards:
-  mass_scale: 1.5
-  pellet_reward: 0.05
-  eat_cell_reward: 10.0
-  death_penalty: -3.0
+  mass_scale: 3.0            # Stronger signal from mass growth
+  pellet_reward: 0.15        # 3x boost: main early learning signal
+  eat_cell_reward: 15.0      # Big payoff for eating opponents
+  death_penalty: -8.0        # Strong penalty to learn avoidance
   inefficient_split_penalty: 0.0
   split_eval_window: 30
-  survival_reward: 0.002
+  survival_reward: 0.001     # Tiny baseline, mass growth is the signal
+  proximity_pellet_reward: 0.02  # Reward for moving toward nearest pellet
 
 simulation:
-  max_steps: 1000
+  max_steps: 3000            # 3x longer episodes = more time to learn
   num_bots: 10
   spatial_grid_cell_size: 100.0
 
