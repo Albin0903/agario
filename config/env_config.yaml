@@ -41,12 +41,13 @@ observation:
   total_dims: 84
 
 rewards:
-  mass_scale: 1.0
-  eat_cell_reward: 5.0
-  death_penalty: -10.0
-  inefficient_split_penalty: -0.5
+  mass_scale: 1.5
+  pellet_reward: 0.05
+  eat_cell_reward: 10.0
+  death_penalty: -3.0
+  inefficient_split_penalty: 0.0
   split_eval_window: 30
-  survival_reward: 0.001
+  survival_reward: 0.002
 
 simulation:
   max_steps: 1000

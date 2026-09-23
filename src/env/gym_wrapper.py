@@ -150,9 +150,10 @@ class AgarEnv(gym.Env):
 
         rewards_cfg = cfg.get("rewards", {})
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
+        self.pellet_reward = float(rewards_cfg.get("pellet_reward", 0.05))
         self.eat_cell_reward = float(rewards_cfg.get("eat_cell_reward", 5.0))
         self.death_penalty = float(rewards_cfg.get("death_penalty", -10.0))
-        self.inefficient_split_penalty = float(rewards_cfg.get("inefficient_split_penalty", -0.5))
+        self.inefficient_split_penalty = float(rewards_cfg.get("inefficient_split_penalty", 0.0))
         self.split_eval_window = int(rewards_cfg.get("split_eval_window", 30))
         self.survival_reward = float(rewards_cfg.get("survival_reward", 0.001))
 
@@ -298,12 +299,14 @@ class AgarEnv(gym.Env):
         r_mass = (math.sqrt(max(1.0, current_mass)) - math.sqrt(max(1.0, self.prev_mass))) / math.sqrt(
             self.initial_player_mass
         )
+        pellets_eaten = player_events.get("pellets_eaten", 0)
+        r_pellet = float(pellets_eaten) * self.pellet_reward
         r_hunt = float(cells_eaten) * self.eat_cell_reward
         r_death = self.death_penalty if died else 0.0
         r_split_penalty = float(inefficient_splits) * abs(self.inefficient_split_penalty)
         r_survival = self.survival_reward
 
-        reward = float(r_mass + r_hunt + r_death - r_split_penalty + r_survival)
+        reward = float(r_mass * self.mass_scale + r_pellet + r_hunt + r_death - r_split_penalty + r_survival)
 
         self.prev_mass = current_mass
 

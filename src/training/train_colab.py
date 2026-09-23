@@ -87,7 +87,7 @@ def parse_args():
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
     parser.add_argument("--gae-lambda", type=float, default=0.95, help="GAE lambda parameter")
     parser.add_argument("--ent-coef", type=float, default=0.005, help="Entropy coefficient")
-    parser.add_argument("--pool-interval", type=int, default=500_000, help="Steps between self-play pool updates")
+    parser.add_argument("--pool-interval", type=int, default=50_000, help="Steps between self-play pool updates")
     parser.add_argument("--config", type=str, default="config/ppo_config.yaml", help="Path to PPO config YAML")
     parser.add_argument("--env-config", type=str, default="config/env_config.yaml", help="Path to Env config YAML")
     parser.add_argument("--save-dir", type=str, default="checkpoints/ppo", help="Directory to save checkpoints")
