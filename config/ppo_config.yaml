@@ -1,16 +1,17 @@
 # AGAR-RL PPO & Self-Play Configuration
+# Tuned for T4 GPU with smaller arena
 
 ppo:
   learning_rate: 0.0003
-  n_steps: 2048
-  batch_size: 128
+  n_steps: 1024                 # Shorter rollouts = more frequent updates
+  batch_size: 256               # Larger batches = more stable gradients
   n_epochs: 10
-  gamma: 0.99
+  gamma: 0.995                  # Higher discount for longer episodes (2500 steps)
   gae_lambda: 0.95
   clip_range: 0.2
   clip_range_vf: null
   normalize_advantage: true
-  ent_coef: 0.005
+  ent_coef: 0.01                # More exploration early on
   vf_coef: 0.5
   max_grad_norm: 0.5
   total_timesteps: 10000000
@@ -22,15 +23,14 @@ policy:
   activation_fn: "ReLU"
 
 self_play:
-  update_interval_steps: 500000
+  update_interval_steps: 200000   # Save to pool every 200K steps
   max_pool_size: 10
   history_dir: "checkpoints/self_play_pool"
   save_dir: "checkpoints/ppo"
-  heuristic_opponent_ratio: 0.8
+  heuristic_opponent_ratio: 1.0   # 100% heuristic initially (no self-play overhead)
 
 training:
   n_envs: 16
   eval_freq: 20000
   eval_episodes: 5
   seed: 42
-

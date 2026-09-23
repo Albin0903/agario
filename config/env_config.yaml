@@ -1,15 +1,16 @@
 # AGAR-RL Environment Configuration
+# Optimized for fast PPO learning on T4 GPU
 
 arena:
-  width: 2000.0
-  height: 2000.0
+  width: 1200.0               # Smaller arena = denser encounters, faster learning
+  height: 1200.0
 
 physics:
   v_base: 3.2
   v_min: 0.8
   v_mass_exponent: -0.2
-  radius_scale: 3.0          # r = sqrt(m) * 3
-  eat_ratio: 1.1             # m_A >= 1.1 * m_B to consume
+  radius_scale: 3.0            # r = sqrt(m) * 3
+  eat_ratio: 1.1               # m_A >= 1.1 * m_B to consume
   initial_player_mass: 20.0
   min_cell_mass: 10.0
   max_subcells: 16
@@ -24,34 +25,33 @@ physics:
   mass_decay_rate: 0.00003
 
 entities:
-  num_pellets: 1800
+  num_pellets: 1200             # 1200 in 1.44M sq units = 3.6x denser than before
   pellet_mass: 1.0
-  num_viruses: 10
+  num_viruses: 6                # Fewer viruses in smaller arena
   virus_mass: 100.0
   virus_radius: 20.0
   virus_split_threshold: 140.0
 
 observation:
   view_radius_base: 500.0
-  view_radius_scale: 2.0     # R_vue = 500 + 2 * r_c
-  num_pellets_obs: 10        # 10 * 2 = 20 floats
-  num_prey_obs: 5            # 5 * 4 = 20 floats
-  num_predator_obs: 5        # 5 * 4 = 20 floats
-  num_virus_obs: 4           # 4 * 3 = 12 floats
+  view_radius_scale: 2.0       # R_vue = 500 + 2 * r_c
+  num_pellets_obs: 10           # 10 * 2 = 20 floats
+  num_prey_obs: 5               # 5 * 4 = 20 floats
+  num_predator_obs: 5           # 5 * 4 = 20 floats
+  num_virus_obs: 4              # 4 * 3 = 12 floats
   total_dims: 84
 
 rewards:
-  mass_scale: 3.0            # Stronger signal from mass growth
-  pellet_reward: 0.15        # 3x boost: main early learning signal
-  eat_cell_reward: 15.0      # Big payoff for eating opponents
-  death_penalty: -8.0        # Strong penalty to learn avoidance
+  mass_scale: 3.0               # Sqrt(mass) growth as primary signal
+  pellet_reward: 0.2            # Strong per-pellet bonus for early food-seeking
+  eat_cell_reward: 15.0         # Big payoff for eating opponents
+  death_penalty: -5.0           # Moderate: harsh enough to learn, but doesn't drown gradient
   inefficient_split_penalty: 0.0
   split_eval_window: 30
-  survival_reward: 0.001     # Tiny baseline, mass growth is the signal
-  proximity_pellet_reward: 0.02  # Reward for moving toward nearest pellet
+  survival_reward: 0.001        # Tiny baseline
+  proximity_pellet_reward: 0.04 # Dense gradient: reward for approaching nearest food
 
 simulation:
-  max_steps: 3000            # 3x longer episodes = more time to learn
-  num_bots: 10
-  spatial_grid_cell_size: 100.0
-
+  max_steps: 2500               # ~40 seconds of gameplay at 60 FPS
+  num_bots: 5                   # Fewer bots = less death = more time to learn food-seeking
+  spatial_grid_cell_size: 80.0  # Smaller grid cells for smaller arena

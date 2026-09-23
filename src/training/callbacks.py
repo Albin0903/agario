@@ -57,7 +57,11 @@ class SelfPlayCallback(BaseCallback):
                 self.rolling_splits.append(info.get("splits", 0))
 
             if i < len(dones) and dones[i]:
-                if i < len(rewards):
+                # Use VecMonitor's episode info for accurate total episode reward
+                episode_info = info.get("episode", None) if isinstance(info, dict) else None
+                if episode_info is not None:
+                    self.rolling_rewards.append(float(episode_info["r"]))
+                elif i < len(rewards):
                     self.rolling_rewards.append(float(rewards[i]))
 
         # Log rolling statistics
@@ -67,20 +71,23 @@ class SelfPlayCallback(BaseCallback):
             avg_mass = float(np.mean(self.rolling_masses)) if self.rolling_masses else 0.0
             avg_rew = float(np.mean(self.rolling_rewards)) if self.rolling_rewards else 0.0
             avg_eaten = float(np.mean(self.rolling_cells_eaten)) if self.rolling_cells_eaten else 0.0
+            avg_pellets = float(np.mean(self.rolling_pellets_eaten)) if self.rolling_pellets_eaten else 0.0
 
             if self.logger is not None:
                 self.logger.record("agar/avg_mass", avg_mass)
                 self.logger.record("agar/avg_reward", avg_rew)
                 self.logger.record("agar/cells_eaten", avg_eaten)
+                self.logger.record("agar/pellets_eaten", avg_pellets)
                 self.logger.record("agar/self_play_pool_size", len(self.pool))
 
             if self.verbose > 0:
                 print(
                     f"[Step {self.num_timesteps:8d}] "
-                    f"Avg Mass: {avg_mass:6.1f} | "
-                    f"Avg Reward: {avg_rew:6.2f} | "
-                    f"Cells Eaten: {avg_eaten:4.2f} | "
-                    f"Opponents in Pool: {len(self.pool)}"
+                    f"Mass: {avg_mass:5.1f} | "
+                    f"Ep Reward: {avg_rew:7.2f} | "
+                    f"Pellets: {avg_pellets:4.1f} | "
+                    f"Kills: {avg_eaten:4.2f} | "
+                    f"Pool: {len(self.pool)}"
                 )
 
         # Trigger self-play checkpointing and pool update
