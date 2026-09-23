@@ -196,6 +196,21 @@ class AgarEngine:
             xs[halo_quota:] = free_xs
             ys[halo_quota:] = free_ys
 
+        # Ensure strict separation from all virus cores
+        if self.num_viruses > 0 and len(self.viruses_xy) > 0:
+            min_core_dist = max(26.0, float(self.virus_radius * 1.05))
+            for vx, vy in self.viruses_xy:
+                dx = xs - vx
+                dy = ys - vy
+                dists = np.hypot(dx, dy)
+                too_close = dists < min_core_dist
+                if np.any(too_close):
+                    num_bad = np.count_nonzero(too_close)
+                    safe_angles = self.rng.uniform(0.0, 2.0 * np.pi, size=num_bad).astype(np.float32)
+                    safe_dist = self.rng.uniform(min_core_dist + 5.0, min_core_dist + 30.0, size=num_bad).astype(np.float32)
+                    xs[too_close] = np.clip(vx + np.cos(safe_angles) * safe_dist, 20.0, self.width - 20.0)
+                    ys[too_close] = np.clip(vy + np.sin(safe_angles) * safe_dist, 20.0, self.height - 20.0)
+
         return xs, ys
 
     def reset(self, seed: Optional[int] = None) -> None:

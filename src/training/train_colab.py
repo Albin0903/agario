@@ -19,6 +19,8 @@ os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="stable_baselines3")
+warnings.filterwarnings("ignore", message=".*Gym has been unmaintained.*")
+warnings.filterwarnings("ignore", category=UserWarning, module="gym")
 
 import argparse
 import yaml
