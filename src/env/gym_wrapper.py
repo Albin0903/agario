@@ -163,7 +163,7 @@ class AgarEnv(gym.Env):
         self.engine = AgarEngine(
             width=self.width,
             height=self.height,
-            num_pellets=int(cfg.get("entities", {}).get("num_pellets", 1200)),
+            num_pellets=int(cfg.get("entities", {}).get("num_pellets", 1800)),
             pellet_mass=float(cfg.get("entities", {}).get("pellet_mass", 1.0)),
             num_viruses=int(cfg.get("entities", {}).get("num_viruses", 10)),
             virus_mass=float(cfg.get("entities", {}).get("virus_mass", 100.0)),
@@ -174,7 +174,8 @@ class AgarEnv(gym.Env):
             v_min=float(cfg.get("physics", {}).get("v_min", 0.5)),
             radius_scale=float(cfg.get("physics", {}).get("radius_scale", 3.0)),
             max_subcells=int(cfg.get("physics", {}).get("max_subcells", 16)),
-            remerge_cooldown_ticks=int(cfg.get("physics", {}).get("remerge_cooldown_ticks", 300)),
+            remerge_cooldown_ticks=int(cfg.get("physics", {}).get("remerge_cooldown_ticks", 600)),
+            remerge_cooldown_mass_factor=float(cfg.get("physics", {}).get("remerge_cooldown_mass_factor", 0.5)),
             split_boost_speed=float(cfg.get("physics", {}).get("split_boost_speed", 24.0)),
             split_boost_decay=float(cfg.get("physics", {}).get("split_boost_decay", 0.90)),
             eject_loss_mass=float(cfg.get("physics", {}).get("eject_loss_mass", 16.0)),

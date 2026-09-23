@@ -66,10 +66,12 @@ class AgarGameVisualizer:
         self.engine = AgarEngine(
             width=2000.0,
             height=2000.0,
-            num_pellets=1200,
+            num_pellets=1800,
             num_viruses=10,
             v_base=3.2,
             v_min=0.8,
+            remerge_cooldown_ticks=2100,
+            remerge_cooldown_mass_factor=1.2,
             mass_decay_rate=0.0003,
         )
         self.human_id = 0
@@ -267,7 +269,13 @@ class AgarGameVisualizer:
                 lbl_rect = lbl_name.get_rect(center=(sx, sy - 6))
                 self.screen.blit(lbl_name, lbl_rect)
 
-                lbl_mass = self.font_small.render(str(int(cell.mass)), True, (240, 240, 240))
+                mass_str = str(int(cell.mass))
+                if cell.player_id == self.human_id and cell.remerge_cooldown > 0:
+                    secs = int(math.ceil(cell.remerge_cooldown / 60.0))
+                    mass_str += f" ({secs}s)"
+
+                mass_color = (255, 220, 100) if (cell.player_id == self.human_id and cell.remerge_cooldown > 0) else (240, 240, 240)
+                lbl_mass = self.font_small.render(mass_str, True, mass_color)
                 lbl_m_rect = lbl_mass.get_rect(center=(sx, sy + 10))
                 self.screen.blit(lbl_mass, lbl_m_rect)
 

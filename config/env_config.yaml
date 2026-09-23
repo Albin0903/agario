@@ -13,7 +13,8 @@ physics:
   initial_player_mass: 20.0
   min_cell_mass: 10.0
   max_subcells: 16
-  remerge_cooldown_ticks: 300
+  remerge_cooldown_ticks: 600
+  remerge_cooldown_mass_factor: 0.5
   split_boost_speed: 24.0
   split_boost_decay: 0.90
   eject_loss_mass: 16.0
@@ -21,7 +22,7 @@ physics:
   eject_speed: 18.0
 
 entities:
-  num_pellets: 1200
+  num_pellets: 1800
   pellet_mass: 1.0
   num_viruses: 10
   virus_mass: 100.0

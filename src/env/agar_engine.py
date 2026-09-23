@@ -90,7 +90,7 @@ class AgarEngine:
         self,
         width: float = 2000.0,
         height: float = 2000.0,
-        num_pellets: int = 1200,
+        num_pellets: int = 1800,
         pellet_mass: float = 1.0,
         num_viruses: int = 10,
         virus_mass: float = 100.0,
@@ -101,7 +101,8 @@ class AgarEngine:
         v_min: float = 0.5,
         radius_scale: float = 3.0,
         max_subcells: int = 16,
-        remerge_cooldown_ticks: int = 300,
+        remerge_cooldown_ticks: int = 600,
+        remerge_cooldown_mass_factor: float = 0.5,
         split_boost_speed: float = 24.0,
         split_boost_decay: float = 0.90,
         eject_loss_mass: float = 16.0,
@@ -124,6 +125,7 @@ class AgarEngine:
         self.radius_scale = radius_scale
         self.max_subcells = max_subcells
         self.remerge_cooldown_ticks = remerge_cooldown_ticks
+        self.remerge_cooldown_mass_factor = float(remerge_cooldown_mass_factor)
         self.split_boost_speed = split_boost_speed
         self.split_boost_decay = split_boost_decay
         self.eject_loss_mass = eject_loss_mass
@@ -152,24 +154,47 @@ class AgarEngine:
         self.reset(seed)
 
     def _spawn_pellet_coords(self, count: int) -> Tuple[np.ndarray, np.ndarray]:
-        """Generate pellet coordinates, deflecting any pellets near viruses into a rich outer halo."""
-        xs = self.rng.uniform(20.0, self.width - 20.0, size=count).astype(np.float32)
-        ys = self.rng.uniform(20.0, self.height - 20.0, size=count).astype(np.float32)
+        """Generate pellet coordinates with high-density halos concentrated around viruses."""
+        xs = np.zeros(count, dtype=np.float32)
+        ys = np.zeros(count, dtype=np.float32)
 
+        # Allocate dense halos around viruses (approx 35 pellets per virus)
+        halo_quota = 0
         if self.num_viruses > 0 and len(self.viruses_xy) > 0:
-            thresh_sq = (self.virus_radius * 1.35) ** 2
-            for _ in range(2):
-                for vx, vy in self.viruses_xy:
-                    dx = xs - vx
-                    dy = ys - vy
-                    dist_sq = dx * dx + dy * dy
-                    close_mask = dist_sq < thresh_sq
-                    if np.any(close_mask):
-                        num_close = np.count_nonzero(close_mask)
-                        angles = self.rng.uniform(0.0, 2.0 * np.pi, size=num_close).astype(np.float32)
-                        halo_dist = self.rng.uniform(self.virus_radius * 1.4, self.virus_radius * 2.5, size=num_close).astype(np.float32)
-                        xs[close_mask] = np.clip(vx + np.cos(angles) * halo_dist, 20.0, self.width - 20.0)
-                        ys[close_mask] = np.clip(vy + np.sin(angles) * halo_dist, 20.0, self.height - 20.0)
+            pellets_per_virus = 35
+            halo_quota = min(count // 2, len(self.viruses_xy) * pellets_per_virus)
+
+        if halo_quota > 0:
+            v_indices = self.rng.integers(0, len(self.viruses_xy), size=halo_quota)
+            v_xy = self.viruses_xy[v_indices]
+            angles = self.rng.uniform(0.0, 2.0 * np.pi, size=halo_quota).astype(np.float32)
+            dists = self.rng.uniform(self.virus_radius * 1.35, self.virus_radius * 2.5, size=halo_quota).astype(np.float32)
+            xs[:halo_quota] = np.clip(v_xy[:, 0] + np.cos(angles) * dists, 20.0, self.width - 20.0)
+            ys[:halo_quota] = np.clip(v_xy[:, 1] + np.sin(angles) * dists, 20.0, self.height - 20.0)
+
+        # Disperse remaining pellets across arena
+        free_count = count - halo_quota
+        if free_count > 0:
+            free_xs = self.rng.uniform(20.0, self.width - 20.0, size=free_count).astype(np.float32)
+            free_ys = self.rng.uniform(20.0, self.height - 20.0, size=free_count).astype(np.float32)
+
+            if self.num_viruses > 0 and len(self.viruses_xy) > 0:
+                thresh_sq = (self.virus_radius * 1.35) ** 2
+                for _ in range(2):
+                    for vx, vy in self.viruses_xy:
+                        dx = free_xs - vx
+                        dy = free_ys - vy
+                        dist_sq = dx * dx + dy * dy
+                        close_mask = dist_sq < thresh_sq
+                        if np.any(close_mask):
+                            num_close = np.count_nonzero(close_mask)
+                            angles = self.rng.uniform(0.0, 2.0 * np.pi, size=num_close).astype(np.float32)
+                            dists = self.rng.uniform(self.virus_radius * 1.4, self.virus_radius * 2.5, size=num_close).astype(np.float32)
+                            free_xs[close_mask] = np.clip(vx + np.cos(angles) * dists, 20.0, self.width - 20.0)
+                            free_ys[close_mask] = np.clip(vy + np.sin(angles) * dists, 20.0, self.height - 20.0)
+
+            xs[halo_quota:] = free_xs
+            ys[halo_quota:] = free_ys
 
         return xs, ys
 
@@ -244,6 +269,12 @@ class AgarEngine:
         eff_radius = mass_to_radius(total_mass, scale=self.radius_scale)
         return float(cx), float(cy), float(eff_radius)
 
+    def _compute_remerge_cooldown(self, mass: float) -> int:
+        """Compute remerge cooldown ticks based on base ticks and cell mass."""
+        if self.remerge_cooldown_ticks <= 10:
+            return self.remerge_cooldown_ticks
+        return int(self.remerge_cooldown_ticks + mass * self.remerge_cooldown_mass_factor)
+
     def _execute_split(self, player_id: int, target_raw: np.ndarray) -> int:
         """Split player cells into halves along target direction or towards target coordinate."""
         p_cells = self.get_player_cells(player_id)
@@ -271,7 +302,8 @@ class AgarEngine:
             if cell.mass >= 20.0:  # Must have at least 20 mass to split into two >= 10 pieces
                 half_mass = cell.mass / 2.0
                 cell.mass = half_mass
-                cell.remerge_cooldown = self.remerge_cooldown_ticks
+                cooldown = self._compute_remerge_cooldown(half_mass)
+                cell.remerge_cooldown = cooldown
 
                 if default_dir is not None:
                     dir_norm = default_dir
@@ -299,7 +331,7 @@ class AgarEngine:
                     vy=cell.vy,
                     boost_vx=float(dir_norm[0] * self.split_boost_speed),
                     boost_vy=float(dir_norm[1] * self.split_boost_speed),
-                    remerge_cooldown=self.remerge_cooldown_ticks,
+                    remerge_cooldown=cooldown,
                 )
                 self._next_cell_id += 1
                 new_cells.append(proj_cell)
@@ -370,7 +402,8 @@ class AgarEngine:
         num_pieces = min(available_slots + 1, max(2, int(cell.mass / 25.0)))
         piece_mass = cell.mass / num_pieces
         cell.mass = piece_mass
-        cell.remerge_cooldown = self.remerge_cooldown_ticks
+        cooldown = self._compute_remerge_cooldown(piece_mass)
+        cell.remerge_cooldown = cooldown
 
         angles = np.linspace(0, 2 * np.pi, num_pieces, endpoint=False)
         for i in range(1, num_pieces):
@@ -391,7 +424,7 @@ class AgarEngine:
                 vy=cell.vy,
                 boost_vx=float(dx * self.split_boost_speed * 0.7),
                 boost_vy=float(dy * self.split_boost_speed * 0.7),
-                remerge_cooldown=self.remerge_cooldown_ticks,
+                remerge_cooldown=cooldown,
             )
             self._next_cell_id += 1
             self.cells.append(frag)

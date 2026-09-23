@@ -257,4 +257,38 @@ def test_subcells_mouse_target_convergence():
     assert dist < 200.0, f"Expected distance < 200.0, got {dist}"
 
 
+def test_mass_dependent_remerge_cooldown():
+    """Verify subcell remerge cooldown scales dynamically with subcell mass."""
+    engine = AgarEngine(
+        width=2000.0,
+        height=2000.0,
+        num_pellets=0,
+        num_viruses=0,
+        remerge_cooldown_ticks=600,
+        remerge_cooldown_mass_factor=0.5,
+    )
+    # Player 0: Small cell (mass 50)
+    engine.spawn_player(0, initial_mass=50.0, xy=(500.0, 500.0))
+    # Player 1: Large cell (mass 1000)
+    engine.spawn_player(1, initial_mass=1000.0, xy=(1500.0, 1500.0))
+
+    # Split both players
+    engine.step({
+        0: np.array([1.0, 0.0, 0.8], dtype=np.float32),
+        1: np.array([1.0, 0.0, 0.8], dtype=np.float32),
+    })
+
+    p0_cells = engine.get_player_cells(0)
+    p1_cells = engine.get_player_cells(1)
+    assert len(p0_cells) == 2
+    assert len(p1_cells) == 2
+
+    # Small cell half mass is 25: cooldown = 600 + int(25 * 0.5) - 1 step tick = 611
+    assert p0_cells[0].remerge_cooldown == 611
+    # Large cell half mass is 500: cooldown = 600 + int(500 * 0.5) - 1 step tick = 849
+    assert p1_cells[0].remerge_cooldown == 849
+    assert p1_cells[0].remerge_cooldown > p0_cells[0].remerge_cooldown
+
+
+
 
