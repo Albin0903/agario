@@ -157,19 +157,19 @@ class AgarEngine:
         ys = self.rng.uniform(20.0, self.height - 20.0, size=count).astype(np.float32)
 
         if self.num_viruses > 0 and len(self.viruses_xy) > 0:
-            thresh_sq = (self.virus_radius * 1.5) ** 2
-            for vx, vy in self.viruses_xy:
-                dx = xs - vx
-                dy = ys - vy
-                dist_sq = dx * dx + dy * dy
-                close_mask = dist_sq < thresh_sq
-                if np.any(close_mask):
-                    num_close = np.count_nonzero(close_mask)
-                    # Deflect into outer ring (1.2 to 2.4 * virus_radius)
-                    angles = self.rng.uniform(0.0, 2.0 * np.pi, size=num_close).astype(np.float32)
-                    halo_dist = self.rng.uniform(self.virus_radius * 1.2, self.virus_radius * 2.4, size=num_close).astype(np.float32)
-                    xs[close_mask] = np.clip(vx + np.cos(angles) * halo_dist, 20.0, self.width - 20.0)
-                    ys[close_mask] = np.clip(vy + np.sin(angles) * halo_dist, 20.0, self.height - 20.0)
+            thresh_sq = (self.virus_radius * 1.35) ** 2
+            for _ in range(2):
+                for vx, vy in self.viruses_xy:
+                    dx = xs - vx
+                    dy = ys - vy
+                    dist_sq = dx * dx + dy * dy
+                    close_mask = dist_sq < thresh_sq
+                    if np.any(close_mask):
+                        num_close = np.count_nonzero(close_mask)
+                        angles = self.rng.uniform(0.0, 2.0 * np.pi, size=num_close).astype(np.float32)
+                        halo_dist = self.rng.uniform(self.virus_radius * 1.4, self.virus_radius * 2.5, size=num_close).astype(np.float32)
+                        xs[close_mask] = np.clip(vx + np.cos(angles) * halo_dist, 20.0, self.width - 20.0)
+                        ys[close_mask] = np.clip(vy + np.sin(angles) * halo_dist, 20.0, self.height - 20.0)
 
         return xs, ys
 
@@ -693,9 +693,13 @@ class AgarEngine:
 
                 eaten = np.where(dists_sq < r_sq)[0]
                 for idx in eaten:
+                    em = self.ejected[idx]
+                    # Grace period: player cannot instantly eat their own newly ejected pellet
+                    if em.player_id == cell.player_id and em.ticks_remaining > 13:
+                        continue
                     if idx not in eaten_ejected_indices:
                         eaten_ejected_indices.add(idx)
-                        cell.mass += self.ejected[idx].mass
+                        cell.mass += em.mass
                         self.step_events[cell.player_id]["ejected_mass_eaten"] += 1
 
         # 2. Viruses eat ejected mass (feed virus to make it grow and shoot)
