@@ -235,8 +235,10 @@ def main():
             tensorboard_log=tb_log,
         )
     else:
-        if args.resume:
+        if args.resume and args.resume.lower() not in ("none", "false", "no"):
             print(f"\n⚠️ Checkpoint '{args.resume}' not found. Starting fresh PPO training from scratch.")
+        else:
+            print("\n🚀 Starting fresh PPO training from scratch (V2 architecture).")
         model = PPO(
             policy="MlpPolicy",
             env=vec_env,
