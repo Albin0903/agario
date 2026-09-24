@@ -152,8 +152,8 @@ class AgarEnv(gym.Env):
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
         self.pellet_reward = float(rewards_cfg.get("pellet_reward", 0.05))
         self.eat_cell_reward = float(rewards_cfg.get("eat_cell_reward", 5.0))
-        self.death_penalty = float(rewards_cfg.get("death_penalty", -10.0))
-        self.inefficient_split_penalty = float(rewards_cfg.get("inefficient_split_penalty", 1.5))
+        self.death_penalty = float(rewards_cfg.get("death_penalty", -50.0))
+        self.inefficient_split_penalty = float(rewards_cfg.get("inefficient_split_penalty", 2.0))
         self.split_eval_window = int(rewards_cfg.get("split_eval_window", 40))
         self.survival_reward = float(rewards_cfg.get("survival_reward", 0.001))
         self.proximity_pellet_reward = float(rewards_cfg.get("proximity_pellet_reward", 0.0))
@@ -256,9 +256,9 @@ class AgarEnv(gym.Env):
         # Clip action to action space
         raw_action = np.clip(action, self.action_space.low, self.action_space.high)
 
-        # Temporal smoothing on target direction (75% new, 25% prev) to prevent 1-tick 180° flutter
-        smooth_x = 0.75 * raw_action[0] + 0.25 * self.prev_action[0]
-        smooth_y = 0.75 * raw_action[1] + 0.25 * self.prev_action[1]
+        # Temporal smoothing on target direction (Guide Section 4.A: alpha=0.7)
+        smooth_x = 0.70 * raw_action[0] + 0.30 * self.prev_action[0]
+        smooth_y = 0.70 * raw_action[1] + 0.30 * self.prev_action[1]
         action = np.array([smooth_x, smooth_y, raw_action[2]], dtype=np.float32)
 
         # Direction jerk penalty (penalizes chaotic 180° back-and-forth oscillations)
@@ -276,9 +276,10 @@ class AgarEnv(gym.Env):
             action[2] = -1.0
 
         if trig > 0.5:
-            if pre_mass < 36.0:
-                # Attempting to split when smaller than official Agar.io min mass (36)
-                action[2] = -1.0  # Mask action: no-op
+            p_cells_now = self.engine.get_player_cells(self.learning_player_id)
+            if pre_mass < 36.0 or len(p_cells_now) >= 16:
+                # Mask split action if mass < 36 or at max subcells capacity (Guide Section 4.B)
+                action[2] = -1.0
                 r_invalid -= 0.5
             else:
                 cx_pre, cy_pre, _ = self.engine.get_player_centroid(self.learning_player_id)
@@ -362,11 +363,9 @@ class AgarEnv(gym.Env):
                 retained_splits.append((split_time, eaten_at_split))
         self.active_splits = retained_splits
 
-        # Compute Reward (Section 2.4)
-        # R_mass = (sqrt(m_t) - sqrt(m_{t-1})) / sqrt(m_{init})
-        r_mass = (math.sqrt(max(1.0, current_mass)) - math.sqrt(max(1.0, self.prev_mass))) / math.sqrt(
-            self.initial_player_mass
-        )
+        # Compute Reward (Guide Section 3: Composite Normalized Reward)
+        # 1. R_growth: Relative logarithmic growth: c_g * ln(Mass(t) / (Mass(t-1) + eps))
+        r_mass = 1.0 * math.log(max(1.0, current_mass) / max(1.0, self.prev_mass))
         pellets_eaten = player_events.get("pellets_eaten", 0)
         r_pellet = float(pellets_eaten) * self.pellet_reward
         r_hunt = float(cells_eaten) * self.eat_cell_reward
@@ -415,7 +414,7 @@ class AgarEnv(gym.Env):
                             r_danger -= float(0.4 * heading * danger_ratio)
                         break
 
-        # Virus disaster penalty & continuous proximity repulsion when vulnerable
+        # Virus disaster penalty & continuous proximity repulsion when vulnerable (Section 3.5)
         r_virus = 0.0
         if player_events.get("virus_exploded", False):
             r_virus -= 30.0  # Massive penalty for popping on a virus!
@@ -430,18 +429,30 @@ class AgarEnv(gym.Env):
                     r_virus -= float(0.8 * (danger_v ** 2))
                     break
 
-        # Arena boundary wall danger & corner camping prevention
+        # Virus shelter bonus: reward small cells for hiding near viruses when chased by predator (Section 3.5)
+        if not died and current_mass < 100.0 and len(learning_cells) > 0:
+            cx_s, cy_s, _ = self.engine.get_player_centroid(self.learning_player_id)
+            near_virus = any(math.hypot(vx - cx_s, vy - cy_s) < 100.0 for vx, vy in self.engine.viruses_xy)
+            has_threat = any(
+                c.player_id != self.learning_player_id and c.mass >= 1.15 * current_mass and math.hypot(c.x - cx_s, c.y - cy_s) < 250.0
+                for c in self.engine.cells
+            )
+            if near_virus and has_threat:
+                r_virus += 0.1
+
+        # Arena boundary wall danger (Section 3.4: R_wall = -c_w * ((D_safe - d_wall) / D_safe)^2)
         r_wall = 0.0
         if not died and len(learning_cells) > 0:
             cx, cy, _ = self.engine.get_player_centroid(self.learning_player_id)
             d_wall = min(cx, cy, self.width - cx, self.height - cy)
-            if d_wall < 150.0:  # Wide buffer to keep agent circulating in open arena
-                wall_factor = (150.0 - d_wall) / 150.0
-                r_wall -= float(0.20 * wall_factor)
+            d_safe = 120.0  # 10% of arena width
+            if d_wall < d_safe:
+                wall_factor = (d_safe - d_wall) / d_safe
+                r_wall -= float(0.50 * (wall_factor ** 2))
 
-                # Corner camping penalty: two walls simultaneously close (< 130)
-                in_corner_x = (cx < 130.0 or cx > self.width - 130.0)
-                in_corner_y = (cy < 130.0 or cy > self.height - 130.0)
+                # Corner camping penalty: two walls simultaneously close (< 120)
+                in_corner_x = (cx < d_safe or cx > self.width - d_safe)
+                in_corner_y = (cy < d_safe or cy > self.height - d_safe)
                 if in_corner_x and in_corner_y:
                     r_wall -= 0.35  # Additional continuous penalty for lingering in corners
 

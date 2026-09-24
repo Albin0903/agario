@@ -45,8 +45,8 @@ rewards:
   mass_scale: 3.0               # Sqrt(mass) growth as primary signal
   pellet_reward: 0.2            # Strong per-pellet bonus for early food-seeking
   eat_cell_reward: 15.0         # Big payoff for eating opponents
-  death_penalty: -5.0           # Moderate: harsh enough to learn, but doesn't drown gradient
-  inefficient_split_penalty: 1.5 # Penalize random splits that do not yield cells
+  death_penalty: -50.0          # Guide Section 3.3: Strict terminal failure penalty
+  inefficient_split_penalty: 2.0 # Penalize random splits that do not yield cells (Guide Section 3.6)
   split_eval_window: 40
   survival_reward: 0.001        # Tiny baseline
   proximity_pellet_reward: 0.04 # Dense gradient: reward for approaching nearest food
