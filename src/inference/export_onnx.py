@@ -5,7 +5,7 @@ import os
 import sys
 import time
 import argparse
-from typing import Optional, Tuple
+import math
 import numpy as np
 import torch
 import onnx
@@ -19,18 +19,38 @@ if ROOT_DIR not in sys.path:
 
 
 class OnnxPolicyWrapper(torch.nn.Module):
-    """Wrapper exposing only deterministic actor forward pass for static ONNX export."""
+    """Wrapper exposing deterministic actor forward pass with static [1, 3] signature."""
 
     def __init__(self, policy: torch.nn.Module):
         super().__init__()
         self.policy = policy
+        self.action_space = getattr(policy, "action_space", None)
+        self.is_multidiscrete = hasattr(self.action_space, "nvec")
 
     def forward(self, observation: torch.Tensor) -> torch.Tensor:
-        """Compute action from observation with signature (1, 84) -> (1, 3)."""
+        """Compute action from observation with guaranteed signature (1, 84) -> (1, 3)."""
         features = self.policy.extract_features(observation)
         latent_pi, _ = self.policy.mlp_extractor(features)
-        mean_actions = self.policy.action_net(latent_pi)
-        return torch.clamp(mean_actions, -1.0, 1.0)
+        logits = self.policy.action_net(latent_pi)
+
+        if self.is_multidiscrete:
+            # MultiDiscrete([24, 3]): 24 angle logits + 3 trigger logits = 27 logits
+            angle_logits = logits[:, :24]
+            trig_logits = logits[:, 24:]
+            angle_idx = torch.argmax(angle_logits, dim=-1, keepdim=True).to(torch.float32)
+            trig_idx = torch.argmax(trig_logits, dim=-1, keepdim=True)
+
+            theta = angle_idx * (2.0 * math.pi / 24.0)
+            dx = torch.cos(theta)
+            dy = torch.sin(theta)
+            # trig: 0 -> -1.0 (idle), 1 -> 0.8 (split), 2 -> 0.4 (eject)
+            trig = torch.where(trig_idx == 1, torch.tensor(0.8, device=logits.device),
+                   torch.where(trig_idx == 2, torch.tensor(0.4, device=logits.device),
+                                              torch.tensor(-1.0, device=logits.device)))
+            return torch.cat([dx, dy, trig], dim=-1)
+        else:
+            return torch.clamp(logits, -1.0, 1.0)
+
 
 
 def export_to_onnx(

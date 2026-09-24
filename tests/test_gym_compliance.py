@@ -38,15 +38,15 @@ def test_observation_space_bounds():
 
 
 def test_reward_mechanisms():
-    """Verify reward shaping components: mass gain, hunting, death, and survival."""
+    """Verify V3 SOTA reward components: delta mass gain, zero passive camp reward, and death penalty."""
     env = AgarEnv()
     obs, info = env.reset(seed=42)
 
-    # 1. Passive survival reward test
-    action = np.array([0.0, 0.0, -1.0], dtype=np.float32)
+    # 1. Passive camping gives 0.0 (anti-passivity guarantee)
+    action = np.array([0, 0], dtype=np.int64)  # MultiDiscrete: angle 0, no-split
     obs, reward, terminated, truncated, info = env.step(action)
-    # Even with zero mass change, survival reward +0.001 should be present
-    assert reward >= 0.001 or info["died"]
+    # Zero delta mass with no kills must yield 0.0 (no free survival points)
+    assert reward == 0.0 or info["player_mass"] > 20.0 or info["died"]
 
     # 2. Death penalty test
     env.reset(seed=42)
@@ -54,7 +54,8 @@ def test_reward_mechanisms():
     env.engine.spawn_player(99, initial_mass=500.0, xy=(env.engine.cells[0].x, env.engine.cells[0].y))
     obs, reward, terminated, truncated, info = env.step(action)
     assert terminated is True
-    assert reward <= -5.0  # Death penalty should be strongly negative
+    assert reward < 0.0  # Death penalty must be strictly negative
+
 
 
 def test_seed_reproducibility():

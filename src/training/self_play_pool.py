@@ -100,20 +100,16 @@ class SelfPlayPool:
     def get_action(self, opponent: Optional[OpponentEntry], obs: np.ndarray) -> np.ndarray:
         """Query action from opponent model, or fallback to random/zeros."""
         if opponent is None or opponent.policy is None:
-            return np.array([0.0, 0.0, -1.0], dtype=np.float32)
+            ang = random.uniform(0, 2 * np.pi)
+            return np.array([np.cos(ang), np.sin(ang), -1.0], dtype=np.float32)
 
-        with torch.no_grad():
-            obs_tensor = torch.as_tensor(obs, dtype=torch.float32, device=self.device).unsqueeze(0)
-            # Query policy distribution action mean
-            features = opponent.policy.extract_features(obs_tensor)
-            if hasattr(opponent.policy, "mlp_extractor"):
-                latent_pi, _ = opponent.policy.mlp_extractor(features)
-                action_mean = opponent.policy.action_net(latent_pi)
-            else:
-                action_mean, _, _ = opponent.policy(obs_tensor)
-
-            action = action_mean.squeeze(0).cpu().numpy()
-            return np.clip(action, -1.0, 1.0)
+        try:
+            with torch.no_grad():
+                action, _ = opponent.policy.predict(obs, deterministic=False)
+                return action
+        except Exception:
+            ang = random.uniform(0, 2 * np.pi)
+            return np.array([np.cos(ang), np.sin(ang), -1.0], dtype=np.float32)
 
     def sync_from_disk(self) -> int:
         """Scan history_dir on disk and load newly saved checkpoints in numerical order."""

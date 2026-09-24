@@ -1,12 +1,12 @@
-# AGAR-RL Environment Configuration
-# Optimized for fast PPO learning on T4 GPU
+# AGAR-RL V3 Environment Configuration
+# SOTA Minimalist Formulation (AgarCL / AgarIA standard)
 
 arena:
-  width: 1200.0               # Smaller arena = denser encounters, faster learning
-  height: 1200.0
+  width: 1400.0               # Balanced arena for 20 bots
+  height: 1400.0
 
 physics:
-  v_base: 3.2
+  v_base: 3.5
   v_min: 0.8
   v_mass_exponent: -0.2
   radius_scale: 3.0            # r = sqrt(m) * 3
@@ -16,7 +16,7 @@ physics:
   max_subcells: 16
   remerge_cooldown_ticks: 600
   remerge_cooldown_mass_factor: 0.5
-  split_boost_speed: 24.0
+  split_boost_speed: 26.0
   split_boost_decay: 0.90
   eject_loss_mass: 16.0
   eject_spawn_mass: 12.0
@@ -25,11 +25,11 @@ physics:
   mass_decay_rate: 0.00003
 
 entities:
-  num_pellets: 1500             # Denser pellets = faster mass accumulation
+  num_pellets: 2000             # Dense food field for constant growth
   pellet_mass: 1.0
-  num_viruses: 6                # Fewer viruses in smaller arena
+  num_viruses: 8                # Authentic virus hazards and shields
   virus_mass: 100.0
-  virus_radius: 20.0
+  virus_radius: 24.0
   virus_split_threshold: 140.0
 
 observation:
@@ -41,17 +41,16 @@ observation:
   num_virus_obs: 4              # 4 * 3 = 12 floats
   total_dims: 84
 
+action:
+  action_type: "multidiscrete"  # "multidiscrete" (24 angles + 3 discrete triggers) or "continuous" (Box 3)
+  num_angles: 24                # 360 / 24 = 15 degrees resolution
+
 rewards:
-  mass_scale: 3.0               # Sqrt(mass) growth as primary signal
-  pellet_reward: 0.2            # Strong per-pellet bonus for early food-seeking
-  eat_cell_reward: 15.0         # Big payoff for eating opponents
-  death_penalty: -50.0          # Guide Section 3.3: Strict terminal failure penalty
-  inefficient_split_penalty: 2.0 # Penalize random splits that do not yield cells (Guide Section 3.6)
-  split_eval_window: 40
-  survival_reward: 0.001        # Tiny baseline
-  proximity_pellet_reward: 0.04 # Dense gradient: reward for approaching nearest food
+  mass_scale: 1.0               # Delta mass scaling
+  kill_reward: 10.0             # Combat payoff for eliminating opponent
+  death_penalty_max: 5.0        # Moderate terminal penalty (prevents paralysis)
 
 simulation:
-  max_steps: 3500               # ~60 seconds of gameplay at 60 FPS (allows merging & virus tactics)
-  num_bots: 5                   # Balanced density for tactical interactions
-  spatial_grid_cell_size: 80.0  # Smaller grid cells for smaller arena
+  max_steps: 3500               # Match length in ticks
+  num_bots: 20                  # SOTA dense multi-agent arena
+  spatial_grid_cell_size: 100.0 # Fast spatial hashing

@@ -382,7 +382,8 @@ class MatchRecorder:
             cx, cy, _ = self.engine.get_player_centroid(self.ai_player_id)
             csx, csy = self._world_to_screen(cx, cy)
 
-            a0, a1, trig = float(ai_action[0]), float(ai_action[1]), float(ai_action[2])
+            parsed_act = self.env.parse_action(ai_action)
+            a0, a1, trig = float(parsed_act[0]), float(parsed_act[1]), float(parsed_act[2])
             norm = math.hypot(a0, a1)
             dir_x = (a0 / norm) if norm > 1e-5 else 1.0
             dir_y = (a1 / norm) if norm > 1e-5 else 0.0

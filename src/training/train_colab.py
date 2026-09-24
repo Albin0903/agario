@@ -13,6 +13,12 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Prevent tensorboard from hanging on heavy tensorflow load on Colab/Python 3.13
 sys.modules["tensorflow"] = None
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
@@ -170,6 +176,7 @@ def main():
     # Setup PPO hyperparameters
     n_steps = int(ppo_cfg.get("ppo", {}).get("n_steps", args.n_steps))
     batch_size = int(ppo_cfg.get("ppo", {}).get("batch_size", args.batch_size))
+    n_epochs = int(ppo_cfg.get("ppo", {}).get("n_epochs", 8))
     gamma = float(ppo_cfg.get("ppo", {}).get("gamma", args.gamma))
     gae_lambda = float(ppo_cfg.get("ppo", {}).get("gae_lambda", args.gae_lambda))
     ent_coef = float(ppo_cfg.get("ppo", {}).get("ent_coef", args.ent_coef))
@@ -238,13 +245,14 @@ def main():
         if args.resume and args.resume.lower() not in ("none", "false", "no"):
             print(f"\n⚠️ Checkpoint '{args.resume}' not found. Starting fresh PPO training from scratch.")
         else:
-            print("\n🚀 Starting fresh PPO training from scratch (V2 architecture).")
+            print("\n🚀 Starting fresh PPO training from scratch (V3 MultiDiscrete SOTA architecture).")
         model = PPO(
             policy="MlpPolicy",
             env=vec_env,
             learning_rate=lr,
             n_steps=n_steps,
             batch_size=batch_size,
+            n_epochs=n_epochs,
             gamma=gamma,
             gae_lambda=gae_lambda,
             ent_coef=ent_coef,

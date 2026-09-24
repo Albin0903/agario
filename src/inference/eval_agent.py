@@ -79,7 +79,7 @@ def evaluate(
     if num_bots is not None:
         env_cfg.setdefault("simulation", {})["num_bots"] = num_bots
 
-    actual_bots = int(env_cfg.get("simulation", {}).get("num_bots", 5))
+    actual_bots = int(env_cfg.get("simulation", {}).get("num_bots", 20))
     env = AgarEnv(config=env_cfg, seed=seed)
     policy_fn = load_policy(model_path, env)
 
