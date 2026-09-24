@@ -25,4 +25,6 @@ Thumbs.db
 
 # Node.js
 node_modules/
-ogar_server/node_modules/
+ogar_server/
+recordings/
+
