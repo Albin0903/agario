@@ -99,8 +99,8 @@ def make_env_fn(
 
 def parse_args():
     parser = argparse.ArgumentParser(description="AGAR-RL Distributed Self-Play Training")
-    parser.add_argument("--n-envs", type=int, default=24, help="Number of parallel environments (default: 24 for GPU L4)")
-    parser.add_argument("--total-timesteps", type=int, default=15_000_000, help="Total training steps")
+    parser.add_argument("--n-envs", "--num-envs", dest="n_envs", type=int, default=24, help="Number of parallel environments (default: 24 for GPU L4)")
+    parser.add_argument("--total-timesteps", "--total-steps", dest="total_timesteps", type=int, default=15_000_000, help="Total training steps")
     parser.add_argument("--batch-size", type=int, default=1024, help="PPO mini-batch size (default: 1024 for GPU L4)")
     parser.add_argument("--n-steps", type=int, default=2048, help="Steps per rollout per env")
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="Learning rate")
