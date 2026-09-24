@@ -48,6 +48,7 @@ def make_env_fn(
     env_config: Dict[str, Any],
     pool: Optional[SelfPlayPool] = None,
     seed: int = 42,
+    max_rivals: int = 2,
 ) -> Callable[[], AgarEnv]:
     """Factory to instantiate vectorized environment instances with self-play opponents."""
     def _init() -> AgarEnv:
@@ -67,23 +68,24 @@ def make_env_fn(
             curr_step = step_counters.get(bot_id, 0)
             step_counters[bot_id] = curr_step + 1
 
-            # Refresh opponent assignment on death or every 300 steps
-            if bot_id not in bot_opponents or curr_step % 300 == 0:
-                bot_opponents[bot_id] = pool.sample_opponent() if (pool and len(pool) > 0) else None
-                bot_cached_actions.pop(bot_id, None)
+            # Only rival bots (IDs <= max_rivals) sample from the self-play pool
+            if bot_id <= max_rivals and pool is not None and len(pool) > 0:
+                if bot_id not in bot_opponents or curr_step % 300 == 0:
+                    bot_opponents[bot_id] = pool.sample_opponent()
+                    bot_cached_actions.pop(bot_id, None)
 
-            opp = bot_opponents.get(bot_id, None)
-            if opp is not None and opp.policy is not None and dummy_env is not None:
-                # Frame-skip / action repeat (every 4 ticks) for opponent AI to sustain 500+ training FPS
-                if bot_id in bot_cached_actions and (curr_step % 4 != 0):
-                    return bot_cached_actions[bot_id]
+                opp = bot_opponents.get(bot_id, None)
+                if opp is not None and opp.policy is not None and dummy_env is not None:
+                    # Action repeat for opponent AI (query every 4 ticks)
+                    if bot_id in bot_cached_actions and (curr_step % 4 != 0):
+                        return bot_cached_actions[bot_id]
 
-                obs = dummy_env._build_observation(player_id=bot_id)
-                action = pool.get_action(opp, obs)
-                bot_cached_actions[bot_id] = action
-                return action
+                    obs = dummy_env._build_observation(player_id=bot_id)
+                    action = pool.get_action(opp, obs)
+                    bot_cached_actions[bot_id] = action
+                    return action
 
-            # Fallback to heuristic action
+            # Ultra-fast Numba heuristic bot for all other bots (runs at 10,000 FPS)
             if dummy_env is not None and bot_id in dummy_env.heuristic_bots:
                 return dummy_env.heuristic_bots[bot_id].get_action(engine)
 
@@ -116,6 +118,8 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--use-dummy-vec", action="store_true", help="Force DummyVecEnv instead of SubprocVecEnv")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume from, or 'auto'")
+    parser.add_argument("--fresh", action="store_true", help="Force starting from scratch (wipe local & drive checkpoints and start clean at step 0)")
+    parser.add_argument("--max-rivals", type=int, default=2, help="Max number of neural net rival bots per env in self-play (default: 2 for 4000+ FPS)")
     parser.add_argument("--warm-start", action="store_true", default=True, help="Warm-start policy network via behavioral cloning on HeuristicBot")
     parser.add_argument("--no-warm-start", action="store_false", dest="warm_start", help="Disable BC warm-start")
     parser.add_argument("--min-pool-step", type=int, default=200_000, help="Minimum step before expanding self-play pool")
@@ -153,6 +157,90 @@ def main():
 
     set_random_seed(args.seed)
 
+    # 1. Manage Checkpoint Cleanup, Drive Restoration, and Auto-Resume Resolution
+    import shutil, glob, re
+
+    def extract_step(path: str) -> int:
+        if "final" in os.path.basename(path):
+            return 999_999_999
+        m = re.search(r"step_(\d+)", path)
+        return int(m.group(1)) if m else 0
+
+    resume_path = None
+
+    if args.fresh:
+        print("🧹 [--fresh flag active] Purging local checkpoints to start clean from Step 0...")
+        for clean_dir in [args.history_dir, args.save_dir]:
+            if os.path.exists(clean_dir):
+                for old_zip in glob.glob(os.path.join(clean_dir, "*.zip")):
+                    try:
+                        os.remove(old_zip)
+                        print(f"   🧹 Purged local checkpoint: {old_zip}")
+                    except Exception:
+                        pass
+        # Also clean accidental early checkpoints in backup_dir
+        if args.backup_dir and os.path.exists(args.backup_dir):
+            for old_zip in glob.glob(os.path.join(args.backup_dir, "*.zip")):
+                try:
+                    os.remove(old_zip)
+                    print(f"   🧹 Purged from Drive backup: {old_zip}")
+                except Exception:
+                    pass
+        resume_path = None
+    elif args.backup_dir:
+        os.makedirs(args.backup_dir, exist_ok=True)
+        drive_zips = [
+            z for z in glob.glob(os.path.join(args.backup_dir, "*.zip"))
+            if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._") and "bc_pretrained" not in os.path.basename(z)
+        ]
+
+        if not drive_zips:
+            # Backup directory is clean -> Starting a new run or version (e.g. v5)
+            # Purge stale local checkpoints on Colab VM disk to avoid accidental resume
+            print(f"📁 [Drive Backup] '{args.backup_dir}' is clean (0 checkpoints).")
+            print("   🧹 Purging stale local VM checkpoints to start clean from Step 0...")
+            for clean_dir in [args.history_dir, args.save_dir]:
+                if os.path.exists(clean_dir):
+                    for old_zip in glob.glob(os.path.join(clean_dir, "*.zip")):
+                        try:
+                            os.remove(old_zip)
+                            print(f"   🧹 Purged stale local checkpoint: {old_zip}")
+                        except Exception:
+                            pass
+            resume_path = None
+        else:
+            # Checkpoints exist in Drive backup -> Restore them into local pool
+            os.makedirs(args.history_dir, exist_ok=True)
+            print(f"📁 [Drive Backup] Found {len(drive_zips)} checkpoints in Drive backup. Restoring...")
+            for dz in drive_zips:
+                dest = os.path.join(args.history_dir, os.path.basename(dz))
+                if not os.path.exists(dest):
+                    shutil.copy2(dz, dest)
+
+            if args.resume and args.resume.lower() not in ("none", "false", "no"):
+                if args.resume == "auto":
+                    drive_zips.sort(key=extract_step, reverse=True)
+                    resume_path = drive_zips[0]
+                    print(f"🔍 [Auto-Resume] Selected latest Drive checkpoint: {resume_path} (step: {extract_step(resume_path):,})")
+                elif os.path.exists(args.resume):
+                    resume_path = args.resume
+                elif os.path.exists(os.path.join(args.backup_dir, os.path.basename(args.resume))):
+                    resume_path = os.path.join(args.backup_dir, os.path.basename(args.resume))
+    else:
+        # No backup_dir specified (e.g. local PC execution)
+        if args.resume and args.resume.lower() not in ("none", "false", "no"):
+            if args.resume == "auto":
+                local_zips = [
+                    z for z in (glob.glob(os.path.join(args.history_dir, "*.zip")) + glob.glob(os.path.join(args.save_dir, "*.zip")))
+                    if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._") and "bc_pretrained" not in os.path.basename(z)
+                ]
+                if local_zips:
+                    local_zips.sort(key=extract_step, reverse=True)
+                    resume_path = local_zips[0]
+                    print(f"🔍 [Auto-Resume] Found {len(local_zips)} local checkpoints. Selected latest: {resume_path}")
+            elif os.path.exists(args.resume):
+                resume_path = args.resume
+
     # Initialize Self-Play Pool (workers run opponent inference on CPU for multi-process safety)
     pool = SelfPlayPool(
         max_size=int(ppo_cfg.get("self_play", {}).get("max_pool_size", 10)),
@@ -162,8 +250,11 @@ def main():
     )
     pool.sync_from_disk()
 
-    # Build Vectorized Environments
-    env_fns = [make_env_fn(rank=i, env_config=env_cfg, pool=pool, seed=args.seed) for i in range(args.n_envs)]
+    # Build Vectorized Environments (only max_rivals bots per env query neural net, others use microsecond Numba)
+    env_fns = [
+        make_env_fn(rank=i, env_config=env_cfg, pool=pool, seed=args.seed, max_rivals=args.max_rivals)
+        for i in range(args.n_envs)
+    ]
 
     # Use SubprocVecEnv on Linux/Colab, with fallback to DummyVecEnv on Windows if requested
     use_dummy = args.use_dummy_vec or (sys.platform == "win32" and args.n_envs <= 4)
@@ -198,46 +289,6 @@ def main():
         tb_log = "logs/tensorboard"
     except ImportError:
         tb_log = None
-
-    # Restore existing checkpoints from backup-dir if available
-    if args.backup_dir and os.path.exists(args.backup_dir):
-        import shutil, glob
-        os.makedirs(args.history_dir, exist_ok=True)
-        drive_zips = glob.glob(os.path.join(args.backup_dir, "*.zip"))
-        if drive_zips:
-            print(f"📁 [Drive Backup] Restoring {len(drive_zips)} checkpoints from Drive to local pool...")
-            for dz in drive_zips:
-                dest = os.path.join(args.history_dir, os.path.basename(dz))
-                if not os.path.exists(dest):
-                    shutil.copy2(dz, dest)
-            pool.sync_from_disk()
-
-    # Resolve checkpoint to resume from
-    resume_path = None
-    if args.resume and args.resume.lower() not in ("none", "false", "no"):
-        if args.resume == "auto":
-            import re, glob
-            def extract_step(path: str) -> int:
-                if "final" in os.path.basename(path):
-                    return 999_999_999
-                m = re.search(r"step_(\d+)", path)
-                return int(m.group(1)) if m else 0
-
-            search_dirs = [d for d in [args.backup_dir, args.history_dir, args.save_dir] if d and os.path.exists(d)]
-            all_zips = []
-            for d in search_dirs:
-                all_zips.extend(glob.glob(os.path.join(d, "*.zip")))
-
-            valid_zips = [z for z in all_zips if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._")]
-            if valid_zips:
-                # Sort numerically descending to pick highest step
-                valid_zips.sort(key=extract_step, reverse=True)
-                resume_path = valid_zips[0]
-                print(f"🔍 [Auto-Resume] Found {len(valid_zips)} checkpoints. Selected latest: {resume_path}")
-        elif os.path.exists(args.resume):
-            resume_path = args.resume
-        elif args.backup_dir and os.path.exists(os.path.join(args.backup_dir, os.path.basename(args.resume))):
-            resume_path = os.path.join(args.backup_dir, os.path.basename(args.resume))
 
     is_resumed = False
     if resume_path and os.path.exists(resume_path):
