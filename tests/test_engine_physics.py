@@ -125,8 +125,8 @@ def test_eject_mass_action():
     engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0)
     cell = engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
 
-    # Trigger eject mass towards right (trigger = 0.0 is in [-0.33, 0.33])
-    events = engine.step({0: np.array([1.0, 0.0, 0.0], dtype=np.float32)})
+    # Trigger eject mass towards right (trigger = 0.4 is in 0.2 < trig <= 0.6)
+    events = engine.step({0: np.array([1.0, 0.0, 0.4], dtype=np.float32)})
 
     assert events[0]["ejects"] == 1
     assert math.isclose(cell.mass, 84.0, rel_tol=1e-5)

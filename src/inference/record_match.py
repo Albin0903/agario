@@ -390,12 +390,12 @@ class MatchRecorder:
             tip_y = int(csy + dir_y * arrow_len)
 
             # Color by action trigger
-            if trig > 0.33:
+            if trig > 0.6:
                 arrow_color = (255, 40, 80)     # Red: Split
                 action_desc = "SPLIT ACTION!"
                 # Draw split blast indicator
                 pygame.draw.circle(self.surface, (255, 80, 120), (csx, csy), int(45 * self.cam_zoom), 3)
-            elif -0.33 <= trig <= 0.33:
+            elif 0.2 < trig <= 0.6:
                 arrow_color = (255, 200, 30)    # Yellow: Eject Mass
                 action_desc = "EJECTING MASS"
             else:

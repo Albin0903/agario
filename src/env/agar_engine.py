@@ -479,11 +479,11 @@ class AgarEngine:
             if act is None or len(act) < 3:
                 continue
             trig = float(act[2])
-            if trig > 0.33:
+            if trig > 0.6:
                 target_vec = np.array([float(act[0]), float(act[1])], dtype=np.float32)
                 splits = self._execute_split(pid, target_vec)
                 self.step_events[pid]["splits"] += splits
-            elif -0.33 <= trig <= 0.33:
+            elif 0.2 < trig <= 0.6:
                 target_vec = np.array([float(act[0]), float(act[1])], dtype=np.float32)
                 ejects = self._execute_eject(pid, target_vec)
                 self.step_events[pid]["ejects"] += ejects

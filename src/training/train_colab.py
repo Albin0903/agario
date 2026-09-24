@@ -109,6 +109,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default="auto", help="Device ('cpu', 'cuda', 'auto')")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--use-dummy-vec", action="store_true", help="Force DummyVecEnv instead of SubprocVecEnv")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume training from")
     return parser.parse_args()
 
 
@@ -186,22 +187,31 @@ def main():
     except ImportError:
         tb_log = None
 
-    model = PPO(
-        policy="MlpPolicy",
-        env=vec_env,
-        learning_rate=lr,
-        n_steps=n_steps,
-        batch_size=batch_size,
-        gamma=gamma,
-        gae_lambda=gae_lambda,
-        ent_coef=ent_coef,
-        vf_coef=0.5,
-        max_grad_norm=0.5,
-        policy_kwargs=policy_kwargs,
-        tensorboard_log=tb_log,
-        verbose=1,
-        device=device,
-    )
+    if args.resume and os.path.exists(args.resume):
+        print(f"\nResuming PPO model from checkpoint: {args.resume}")
+        model = PPO.load(
+            args.resume,
+            env=vec_env,
+            device=device,
+            tensorboard_log=tb_log,
+        )
+    else:
+        model = PPO(
+            policy="MlpPolicy",
+            env=vec_env,
+            learning_rate=lr,
+            n_steps=n_steps,
+            batch_size=batch_size,
+            gamma=gamma,
+            gae_lambda=gae_lambda,
+            ent_coef=ent_coef,
+            vf_coef=0.5,
+            max_grad_norm=0.5,
+            policy_kwargs=policy_kwargs,
+            tensorboard_log=tb_log,
+            verbose=1,
+            device=device,
+        )
 
     # Self-Play Callback
     self_play_callback = SelfPlayCallback(

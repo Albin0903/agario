@@ -383,9 +383,9 @@ class AgarBotClient:
         packets: List[bytes] = [self.build_target_packet(target_world_x, target_world_y)]
 
         # Check action triggers
-        if trigger > 0.33:
+        if trigger > 0.6:
             packets.append(self.build_split_packet())
-        elif -0.33 <= trigger <= 0.33:
+        elif 0.2 < trigger <= 0.6:
             packets.append(self.build_eject_packet())
 
         return packets
