@@ -43,6 +43,11 @@ class SelfPlayCallback(BaseCallback):
         os.makedirs(self.save_dir, exist_ok=True)
         self.pool.sync_from_disk()
 
+    def _init_callback(self) -> None:
+        super()._init_callback()
+        self.last_pool_update = self.num_timesteps
+        self.last_log_step = self.num_timesteps
+
     def _on_step(self) -> bool:
         # Extract environment step information
         infos = self.locals.get("infos", [])

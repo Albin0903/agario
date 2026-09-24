@@ -211,36 +211,41 @@ def main():
 
     # Resolve checkpoint to resume from
     resume_path = None
-    if args.resume:
+    if args.resume and args.resume.lower() not in ("none", "false", "no"):
         if args.resume == "auto":
-            candidates = []
-            if os.path.exists(os.path.join(args.save_dir, "ppo_latest.zip")):
-                candidates.append(os.path.join(args.save_dir, "ppo_latest.zip"))
-            if args.backup_dir and os.path.exists(os.path.join(args.backup_dir, "ppo_latest.zip")):
-                candidates.append(os.path.join(args.backup_dir, "ppo_latest.zip"))
-            import glob
-            pool_ckpts = sorted(glob.glob(os.path.join(args.history_dir, "*.zip")))
-            if pool_ckpts:
-                candidates.append(pool_ckpts[-1])
-            if args.backup_dir:
-                drive_ckpts = sorted(glob.glob(os.path.join(args.backup_dir, "*.zip")))
-                if drive_ckpts:
-                    candidates.append(drive_ckpts[-1])
-            if candidates:
-                resume_path = candidates[0]
+            import re, glob
+            def extract_step(path: str) -> int:
+                if "final" in os.path.basename(path):
+                    return 999_999_999
+                m = re.search(r"step_(\d+)", path)
+                return int(m.group(1)) if m else 0
+
+            search_dirs = [d for d in [args.backup_dir, args.history_dir, args.save_dir] if d and os.path.exists(d)]
+            all_zips = []
+            for d in search_dirs:
+                all_zips.extend(glob.glob(os.path.join(d, "*.zip")))
+
+            valid_zips = [z for z in all_zips if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._")]
+            if valid_zips:
+                # Sort numerically descending to pick highest step
+                valid_zips.sort(key=extract_step, reverse=True)
+                resume_path = valid_zips[0]
+                print(f"🔍 [Auto-Resume] Found {len(valid_zips)} checkpoints. Selected latest: {resume_path}")
         elif os.path.exists(args.resume):
             resume_path = args.resume
         elif args.backup_dir and os.path.exists(os.path.join(args.backup_dir, os.path.basename(args.resume))):
             resume_path = os.path.join(args.backup_dir, os.path.basename(args.resume))
 
+    is_resumed = False
     if resume_path and os.path.exists(resume_path):
-        print(f"\nResuming PPO model from checkpoint: {resume_path}")
+        print(f"\n🔄 Resuming PPO model from checkpoint: {resume_path}")
         model = PPO.load(
             resume_path,
             env=vec_env,
             device=device,
             tensorboard_log=tb_log,
         )
+        is_resumed = True
     else:
         if args.resume and args.resume.lower() not in ("none", "false", "no"):
             print(f"\n⚠️ Checkpoint '{args.resume}' not found. Starting fresh PPO training from scratch.")
@@ -280,6 +285,7 @@ def main():
             total_timesteps=args.total_timesteps,
             callback=self_play_callback,
             progress_bar=False,
+            reset_num_timesteps=not is_resumed,
         )
     except KeyboardInterrupt:
         print("\nTraining interrupted by user. Saving current checkpoint...")
