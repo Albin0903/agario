@@ -139,36 +139,49 @@ class MatchRecorder:
         self.font_large = pygame.font.SysFont("Arial", 26, bold=True)
         self.font_small = pygame.font.SysFont("Arial", 12)
 
+        import yaml
+        env_cfg: Dict[str, Any] = {}
+        cfg_path = os.path.join(ROOT_DIR, "config/env_config.yaml")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                env_cfg = yaml.safe_load(f) or {}
+
+        arena_w = float(env_cfg.get("arena", {}).get("width", 1200.0))
+        arena_h = float(env_cfg.get("arena", {}).get("height", 1200.0))
+        pellets = int(env_cfg.get("entities", {}).get("num_pellets", 1500))
+        viruses = int(env_cfg.get("entities", {}).get("num_viruses", 6))
+        actual_bots = num_bots if num_bots is not None else int(env_cfg.get("simulation", {}).get("num_bots", 5))
+
         # Authentic engine setup
         self.engine = AgarEngine(
-            width=2000.0,
-            height=2000.0,
-            num_pellets=1800,
-            num_viruses=10,
-            v_base=3.2,
-            v_min=0.8,
-            remerge_cooldown_ticks=1800,
-            remerge_cooldown_mass_factor=1.2,
-            mass_decay_rate=0.00002,
+            width=arena_w,
+            height=arena_h,
+            num_pellets=pellets,
+            num_viruses=viruses,
+            v_base=float(env_cfg.get("physics", {}).get("v_base", 3.2)),
+            v_min=float(env_cfg.get("physics", {}).get("v_min", 0.8)),
+            remerge_cooldown_ticks=int(env_cfg.get("physics", {}).get("remerge_cooldown_ticks", 600)),
+            remerge_cooldown_mass_factor=float(env_cfg.get("physics", {}).get("remerge_cooldown_mass_factor", 0.5)),
+            mass_decay_rate=float(env_cfg.get("physics", {}).get("mass_decay_rate", 0.00003)),
         )
 
         self.ai_player_id = 0
-        self.engine.spawn_player(self.ai_player_id, initial_mass=25.0)
+        self.engine.spawn_player(self.ai_player_id, initial_mass=20.0)
 
         self.heuristic_bots = {
-            i: HeuristicBot(i) for i in range(1, self.num_bots + 1)
+            i: HeuristicBot(i) for i in range(1, actual_bots + 1)
         }
-        for i in range(1, self.num_bots + 1):
-            self.engine.spawn_player(i, initial_mass=25.0)
+        for i in range(1, actual_bots + 1):
+            self.engine.spawn_player(i, initial_mass=20.0)
 
         # Policy loading
         self.policy_fn = self._load_policy(model_path)
-        self.env_helper = AgarEnv()
+        self.env_helper = AgarEnv(config=env_cfg)
         self.env_helper.engine = self.engine
 
         # Camera
-        self.cam_x = 1000.0
-        self.cam_y = 1000.0
+        self.cam_x = arena_w / 2.0
+        self.cam_y = arena_h / 2.0
         self.cam_zoom = 1.0
 
         # Stats
