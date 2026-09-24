@@ -10,4 +10,5 @@ pyyaml>=6.0.1
 pytest>=8.0.0
 protobuf>=3.20.2,<6.0.0
 onnxscript>=0.1.0
+pygame>=2.5.0
 
