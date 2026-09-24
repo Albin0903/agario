@@ -945,8 +945,13 @@ class AgarEngine:
                 eaten_indices.add(j)
                 self.cells[i].mass += self.cells[j].mass
                 self.step_events[self.cells[i].player_id]["cells_eaten"] += 1
-                self.step_events[self.cells[j].player_id]["died"] = True
 
         if eaten_indices:
             self.cells = [c for idx, c in enumerate(self.cells) if idx not in eaten_indices]
             self._cells_cache_valid = False
+
+        # A player is ONLY dead when ALL their subcells have been completely eliminated
+        surviving_pids = set(c.player_id for c in self.cells)
+        for pid in self.step_events:
+            if pid not in surviving_pids:
+                self.step_events[pid]["died"] = True

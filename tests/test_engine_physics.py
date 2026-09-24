@@ -348,6 +348,28 @@ def test_non_instant_remerge_penetration():
     assert math.isclose(p_cells_after[0].mass, 550.0, rel_tol=1e-4)
 
 
+def test_multicell_partial_loss_not_fatal():
+    """Verify that when a player has multiple subcells and loses one, died is False until all are gone."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0)
+    c1 = Cell(id=1, player_id=0, x=200.0, y=200.0, mass=20.0)
+    c2 = Cell(id=2, player_id=0, x=800.0, y=800.0, mass=20.0)
+    engine.cells.extend([c1, c2])
+
+    c_pred = Cell(id=3, player_id=1, x=200.0, y=200.0, mass=200.0)
+    engine.cells.append(c_pred)
+
+    events = engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32), 1: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+    assert events[0]["died"] is False, "Player with surviving subcells must not be marked dead!"
+    assert len(engine.get_player_cells(0)) == 1
+
+    c_pred.x = 800.0
+    c_pred.y = 800.0
+    events2 = engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32), 1: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+    assert events2[0]["died"] is True, "Player with 0 subcells must be marked dead!"
+    assert len(engine.get_player_cells(0)) == 0
+
+
+
 
 
 

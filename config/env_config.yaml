@@ -53,6 +53,6 @@ rewards:
 
 simulation:
   max_steps: 3500               # Match length in ticks
-  action_repeat: 3              # 3 physics ticks per RL decision step (solves brownian jitter)
+  action_repeat: 3              # 3 physics ticks per RL decision step (macro-actions)
   num_bots: 20                  # SOTA dense multi-agent arena
   spatial_grid_cell_size: 100.0 # Fast spatial hashing

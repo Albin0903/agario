@@ -11,7 +11,7 @@ ppo:
   clip_range: 0.2
   clip_range_vf: null
   normalize_advantage: true
-  ent_coef: 0.01                # Sustained exploration
+  ent_coef: 0.002               # Balanced exploration (preserves BC warm-start without catastrophic uniform drift)
   vf_coef: 0.5
   max_grad_norm: 0.5
   total_timesteps: 15000000     # 15M timesteps (~30-40 min on GPU L4 @ 6000-8000 FPS)
