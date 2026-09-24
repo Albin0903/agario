@@ -145,12 +145,11 @@ class AgarEnv(gym.Env):
                 dtype=np.float32,
             )
 
-        # SOTA Survival-First Reward formulation
+        # SOTA Minimalist Reward formulation (AgarCL / AgarIA standard)
         rewards_cfg = cfg.get("rewards", {})
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
         self.eat_cell_reward = float(rewards_cfg.get("kill_reward", rewards_cfg.get("eat_cell_reward", 10.0)))
-        self.death_penalty_base = float(rewards_cfg.get("death_penalty_base", 25.0))
-        self.survival_reward_scale = float(rewards_cfg.get("survival_reward_scale", 0.02))
+        self.death_penalty_max = float(rewards_cfg.get("death_penalty_max", 5.0))
         self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.05))
 
         self.action_repeat = int(sim_cfg.get("action_repeat", 3))
@@ -296,31 +295,22 @@ class AgarEnv(gym.Env):
         self.total_cells_eaten += total_cells_eaten
         self.episode_pellets_total += total_pellets_eaten
 
-        # SOTA Survival-First Reward:
-        # 1. Survival Drip: Being alive is the core objective.
-        # Zero reward for camping at mass 20; increases with mass (larger mass = greater security & higher drip).
-        r_survival = 0.0
-        if not died and current_mass > self.initial_player_mass:
-            mass_surplus = (current_mass - self.initial_player_mass) / 100.0
-            r_survival = float(self.survival_reward_scale * min(5.0, mass_surplus))
-
-        # 2. Normalized mass gain (reward for eating and expanding)
+        # SOTA Minimalist Reward (AgarCL / AgarIA standard):
+        # 1. Normalized mass gain (strictly positive on eating pellets or cells)
         delta_mass = current_mass - self.prev_mass
         r_growth = (delta_mass / self.initial_player_mass) * self.mass_scale
 
-        # 3. Combat payoff for eating an opponent
+        # 2. Direct combat payoff for eating an opponent
         r_kill = self.eat_cell_reward * float(total_cells_eaten)
 
-        # 4. Severe Death Penalty (Dying wipes out accumulated gains, Never profitable)
-        r_death = 0.0
-        if died:
-            r_death = -float(self.death_penalty_base + min(25.0, self.prev_mass / 50.0))
+        # 3. Moderate death penalty (AgarIA standard, never paralyzing)
+        r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
 
         # Build next observation (also updates self._last_pellet_dist)
         obs = self._build_observation()
         curr_pellet_dist = self._last_pellet_dist
 
-        # 5. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging
+        # 4. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging
         r_forage = 0.0
         if not died and self.prev_pellet_dist > 0 and curr_pellet_dist > 0:
             if total_pellets_eaten > 0:
@@ -334,7 +324,7 @@ class AgarEnv(gym.Env):
         self.prev_pellet_dist = curr_pellet_dist
         self.prev_mass = current_mass
 
-        reward = float(r_survival + r_growth + r_kill + r_death + r_forage)
+        reward = float(r_growth + r_kill + r_death + r_forage)
 
         terminated = bool(died)
         truncated = bool(self.current_step >= self.max_steps)

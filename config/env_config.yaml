@@ -46,10 +46,9 @@ action:
   num_angles: 24                # 360 / 24 = 15 degrees resolution
 
 rewards:
-  mass_scale: 1.0               # Delta mass scaling
+  mass_scale: 1.0               # Delta mass scaling (AgarCL standard)
   kill_reward: 10.0             # Combat payoff for eliminating opponent
-  death_penalty_base: 25.0      # Severe terminal penalty (dying is never profitable)
-  survival_reward_scale: 0.02   # Drip reward for staying alive, scaled with mass
+  death_penalty_max: 5.0        # Moderate terminal penalty (AgarIA standard, prevents paralysis)
   forage_reward_scale: 0.05     # Dense PBRS gradient towards closest pellet
 
 simulation:
