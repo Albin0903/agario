@@ -19,6 +19,7 @@ class SelfPlayCallback(BaseCallback):
         update_interval_steps: int = 500_000,
         save_dir: str = "checkpoints/ppo",
         log_interval_steps: int = 10_000,
+        min_pool_step: int = 200_000,
         backup_dir: Optional[str] = None,
         verbose: int = 1,
     ):
@@ -27,6 +28,7 @@ class SelfPlayCallback(BaseCallback):
         self.update_interval_steps = update_interval_steps
         self.save_dir = save_dir
         self.log_interval_steps = log_interval_steps
+        self.min_pool_step = min_pool_step
         self.backup_dir = backup_dir
 
         self.last_pool_update = 0
@@ -125,8 +127,12 @@ class SelfPlayCallback(BaseCallback):
             if self.verbose > 0:
                 print(f"[SelfPlayCallback] Checkpoint saved: {checkpoint_path}")
 
-            score = float(np.mean(self.rolling_masses)) if self.rolling_masses else 0.0
-            self.pool.add_checkpoint(checkpoint_path, score=score, tag=f"step_{self.num_timesteps}")
+            if self.num_timesteps >= self.min_pool_step:
+                score = float(np.mean(self.rolling_masses)) if self.rolling_masses else 0.0
+                self.pool.add_checkpoint(checkpoint_path, score=score, tag=f"step_{self.num_timesteps}")
+            else:
+                if self.verbose > 0:
+                    print(f"[SelfPlayCallback] Skipping pool entry (warm-up phase until step {self.min_pool_step:,})")
 
         return True
 

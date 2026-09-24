@@ -89,14 +89,22 @@ def find_nearest_pellets_numba(
 
     # Normalized relative dx, dy in [-1, 1]
     res = np.zeros(k * 2, dtype=np.float32)
-    for i in range(k):
+    nearest_dist = -1.0
+    if best_dists_sq[0] < 1e10:
+        d0 = math.sqrt(max(1e-8, best_dists_sq[0]))
+        nearest_dist = d0
+        # High-signal unit direction towards closest food (norm = 1.0)
+        res[0] = best_dx[0] / d0
+        res[1] = best_dy[0] / d0
+
+    for i in range(1, k):
         if best_dists_sq[i] < 1e10:
             val_x = best_dx[i] / view_r
             val_y = best_dy[i] / view_r
             res[i * 2] = -1.0 if val_x < -1.0 else (1.0 if val_x > 1.0 else val_x)
             res[i * 2 + 1] = -1.0 if val_y < -1.0 else (1.0 if val_y > 1.0 else val_y)
 
-    return res
+    return res, float(nearest_dist)
 
 
 @nb.njit(fastmath=True)

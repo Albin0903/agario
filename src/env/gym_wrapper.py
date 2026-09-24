@@ -132,7 +132,9 @@ class AgarEnv(gym.Env):
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
         self.eat_cell_reward = float(rewards_cfg.get("kill_reward", rewards_cfg.get("eat_cell_reward", 10.0)))
         self.death_penalty_max = float(rewards_cfg.get("death_penalty_max", 5.0))
+        self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.05))
 
+        self.action_repeat = int(sim_cfg.get("action_repeat", 3))
         self.initial_player_mass = float(cfg.get("physics", {}).get("initial_player_mass", 20.0))
         self.v_base = float(cfg.get("physics", {}).get("v_base", 3.5))
         self.v_max = 2.0
@@ -175,6 +177,8 @@ class AgarEnv(gym.Env):
 
         self.current_step = 0
         self.prev_mass = self.initial_player_mass
+        self.prev_pellet_dist = -1.0
+        self._last_pellet_dist = -1.0
         self.heuristic_bots: Dict[int, HeuristicBot] = {}
         self.total_cells_eaten = 0
         self.episode_pellets_total = 0
@@ -203,6 +207,7 @@ class AgarEnv(gym.Env):
         self.episode_pellets_total = 0
 
         obs = self._build_observation()
+        self.prev_pellet_dist = self._last_pellet_dist
         info = {
             "player_mass": self.initial_player_mass,
             "step": self.current_step,
@@ -229,71 +234,87 @@ class AgarEnv(gym.Env):
         return np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
     def step(self, action: Any) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
-        """Advance environment by one timestep with learning agent action."""
+        """Advance environment by one timestep with learning agent action (applying action_repeat)."""
         self.current_step += 1
-
         engine_action = self.parse_action(action)
 
-        # Prepare actions dictionary for all active players
-        actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: engine_action}
+        total_cells_eaten = 0
+        total_pellets_eaten = 0
+        total_splits = 0
+        died = False
 
-        # Query actions for bots
-        for bot_id in range(1, self.num_bots + 1):
-            if not self.engine.get_player_cells(bot_id):
-                # Respawn dead bot
-                self.engine.spawn_player(bot_id, initial_mass=self.initial_player_mass)
+        # Execute physics sub-ticks for action persistence / macro-action
+        for _ in range(self.action_repeat):
+            actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: engine_action}
 
-            if self.opponent_policy_fn is not None:
-                bot_act = self.opponent_policy_fn(bot_id, self.engine)
-            else:
-                bot_act = self.heuristic_bots[bot_id].get_action(self.engine)
-            actions_dict[bot_id] = self.parse_action(bot_act)
+            for bot_id in range(1, self.num_bots + 1):
+                if not self.engine.get_player_cells(bot_id):
+                    self.engine.spawn_player(bot_id, initial_mass=self.initial_player_mass)
+                if self.opponent_policy_fn is not None:
+                    bot_act = self.opponent_policy_fn(bot_id, self.engine)
+                else:
+                    bot_act = self.heuristic_bots[bot_id].get_action(self.engine)
+                actions_dict[bot_id] = self.parse_action(bot_act)
 
-        # Advance physics simulation
-        events = self.engine.step(actions_dict)
+            events = self.engine.step(actions_dict)
+            player_events = events.get(self.learning_player_id, {})
+            total_cells_eaten += player_events.get("cells_eaten", 0)
+            total_pellets_eaten += player_events.get("pellets_eaten", 0)
+            total_splits += player_events.get("splits", 0)
 
-        # Learning player status
-        learning_cells = self.engine.get_player_cells(self.learning_player_id)
+            learning_cells = self.engine.get_player_cells(self.learning_player_id)
+            if player_events.get("died", False) or (len(learning_cells) == 0):
+                died = True
+                break
+
         current_mass = self.engine.get_player_mass(self.learning_player_id)
-        player_events = events.get(self.learning_player_id, {})
+        self.total_cells_eaten += total_cells_eaten
+        self.episode_pellets_total += total_pellets_eaten
 
-        cells_eaten = player_events.get("cells_eaten", 0)
-        pellets_eaten = player_events.get("pellets_eaten", 0)
-        splits_performed = player_events.get("splits", 0)
-        died = player_events.get("died", False) or (len(learning_cells) == 0)
-
-        self.total_cells_eaten += cells_eaten
-        self.episode_pellets_total += pellets_eaten
-
-        # SOTA Minimalist Reward Calculation (AgarCL / AgarIA Standard)
+        # SOTA Hybrid Reward: Sparse Growth/Kill + Dense PBRS Foraging
         # 1. Normalized mass gain (strictly positive on eating pellets or cells)
         delta_mass = current_mass - self.prev_mass
         r_growth = (delta_mass / self.initial_player_mass) * self.mass_scale
 
         # 2. Direct combat payoff for eating an opponent
-        r_kill = self.eat_cell_reward * float(cells_eaten)
+        r_kill = self.eat_cell_reward * float(total_cells_eaten)
 
         # 3. Moderate death penalty (never paralyzing)
         r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
 
-        reward = float(r_growth + r_kill + r_death)
+        # Build next observation (also updates self._last_pellet_dist)
+        obs = self._build_observation()
+        curr_pellet_dist = self._last_pellet_dist
 
+        # 4. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging
+        r_forage = 0.0
+        if not died and self.prev_pellet_dist > 0 and curr_pellet_dist > 0:
+            if total_pellets_eaten > 0:
+                r_forage = self.forage_reward_scale
+            else:
+                dist_delta = self.prev_pellet_dist - curr_pellet_dist
+                max_close = max(1.0, float(self.action_repeat) * self.v_max)
+                progress = np.clip(dist_delta / max_close, -1.0, 1.0)
+                r_forage = float(progress * self.forage_reward_scale)
+
+        self.prev_pellet_dist = curr_pellet_dist
         self.prev_mass = current_mass
+
+        reward = float(r_growth + r_kill + r_death + r_forage)
 
         terminated = bool(died)
         truncated = bool(self.current_step >= self.max_steps)
 
-        obs = self._build_observation()
         info = {
             "player_mass": current_mass,
-            "cells_eaten": cells_eaten,
-            "pellets_eaten": pellets_eaten,
+            "cells_eaten": total_cells_eaten,
+            "pellets_eaten": total_pellets_eaten,
             "episode_pellets": self.episode_pellets_total,
             "episode_kills": self.total_cells_eaten,
             "died": died,
-            "splits": splits_performed,
+            "splits": total_splits,
             "step": self.current_step,
-            "num_subcells": len(learning_cells),
+            "num_subcells": len(self.engine.get_player_cells(self.learning_player_id)),
         }
 
         return obs, reward, terminated, truncated, info
@@ -303,7 +324,7 @@ class AgarEnv(gym.Env):
 
         Structure:
           1. Self state (4 floats): [tanh(m/500), vx/vmax, vy/vmax, min(1.0, k/16)]
-          2. 10 nearest Pellets (20 floats): [dx/R, dy/R]
+          2. 10 nearest Pellets (20 floats): [u_x, u_y] for nearest + [dx/R, dy/R] for others
           3. 5 Prey Cells (20 floats): [dx/R, dy/R, tanh(dm/100), v_rel/vmax]
           4. 5 Predator Cells (20 floats): [dx/R, dy/R, tanh(dm/100), v_rel/vmax]
           5. 4 nearest Viruses (12 floats): [dx/R, dy/R, threat_sign]
@@ -331,7 +352,9 @@ class AgarEnv(gym.Env):
         obs[3] = float(np.clip(len(my_cells) / 16.0, 0.0, 1.0))
 
         # 2. 10 nearest Pellets (20 floats) -> offset 4 to 24 (compiled Numba JIT)
-        obs[4:24] = find_nearest_pellets_numba(cx, cy, self.engine.pellets_xy, view_r, k=10)
+        pellet_feats, nearest_dist = find_nearest_pellets_numba(cx, cy, self.engine.pellets_xy, view_r, k=10)
+        obs[4:24] = pellet_feats
+        self._last_pellet_dist = nearest_dist
 
         # Separate preys and predators among other cells
         preys: List[Tuple[float, float, float, float, float]] = []

@@ -130,8 +130,10 @@ class MatchRecorder:
         screen_height: int = 720,
         fps: int = 30,
         num_bots: Optional[int] = None,
+        deterministic: bool = False,
         seed: int = 42,
     ):
+        self.deterministic = deterministic
         pygame.init()
         self.width = screen_width
         self.height = screen_height
@@ -182,9 +184,9 @@ class MatchRecorder:
         if model_path.endswith(".zip"):
             try:
                 from stable_baselines3 import PPO
-                print(f"[MatchRecorder] Loading Stable-Baselines3 model from: {model_path}")
+                print(f"[MatchRecorder] Loading Stable-Baselines3 model from: {model_path} (deterministic={self.deterministic})")
                 sb3_model = PPO.load(model_path, device="cpu")
-                return lambda obs: sb3_model.predict(obs, deterministic=True)[0]
+                return lambda obs: sb3_model.predict(obs, deterministic=self.deterministic)[0]
             except Exception as e:
                 print(f"[MatchRecorder] Error loading SB3 model: {e}")
 
@@ -465,6 +467,7 @@ def main():
     parser.add_argument("--height", type=int, default=720, help="Video height")
     parser.add_argument("--fps", type=int, default=30, help="Video framerate")
     parser.add_argument("--bots", type=int, default=None, help="Number of bot opponents (default: from env_config.yaml)")
+    parser.add_argument("--deterministic", action="store_true", help="Force argmax deterministic action selection")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
@@ -475,6 +478,7 @@ def main():
         screen_height=args.height,
         fps=args.fps,
         num_bots=args.bots,
+        deterministic=args.deterministic,
         seed=args.seed,
     )
     recorder.record(steps=args.steps)

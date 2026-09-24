@@ -45,8 +45,8 @@ def test_reward_mechanisms():
     # 1. Passive camping gives 0.0 (anti-passivity guarantee)
     action = np.array([0, 0], dtype=np.int64)  # MultiDiscrete: angle 0, no-split
     obs, reward, terminated, truncated, info = env.step(action)
-    # Zero delta mass with no kills must yield 0.0 (no free survival points)
-    assert reward == 0.0 or info["player_mass"] > 20.0 or info["died"]
+    # Zero delta mass with no kills must not yield free survival reward
+    assert reward <= 0.0 or info["player_mass"] > 20.0 or info["died"]
 
     # 2. Death penalty test
     env.reset(seed=42)

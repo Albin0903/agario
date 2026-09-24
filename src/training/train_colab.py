@@ -116,6 +116,9 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--use-dummy-vec", action="store_true", help="Force DummyVecEnv instead of SubprocVecEnv")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume from, or 'auto'")
+    parser.add_argument("--warm-start", action="store_true", default=True, help="Warm-start policy network via behavioral cloning on HeuristicBot")
+    parser.add_argument("--no-warm-start", action="store_false", dest="warm_start", help="Disable BC warm-start")
+    parser.add_argument("--min-pool-step", type=int, default=200_000, help="Minimum step before expanding self-play pool")
     parser.add_argument("--backup-dir", type=str, default=None, help="Directory to mirror checkpoints to (e.g. Google Drive)")
     return parser.parse_args()
 
@@ -150,12 +153,12 @@ def main():
 
     set_random_seed(args.seed)
 
-    # Initialize Self-Play Pool
+    # Initialize Self-Play Pool (workers run opponent inference on CPU for multi-process safety)
     pool = SelfPlayPool(
         max_size=int(ppo_cfg.get("self_play", {}).get("max_pool_size", 10)),
         history_dir=args.history_dir,
         heuristic_ratio=float(ppo_cfg.get("self_play", {}).get("heuristic_opponent_ratio", 0.3)),
-        device=device,
+        device="cpu",
     )
     pool.sync_from_disk()
 
@@ -247,27 +250,68 @@ def main():
         )
         is_resumed = True
     else:
-        if args.resume and args.resume.lower() not in ("none", "false", "no"):
-            print(f"\n⚠️ Checkpoint '{args.resume}' not found. Starting fresh PPO training from scratch.")
+        # Check if warm-start BC model is requested or available
+        bc_path = os.path.join(args.save_dir, "ppo_bc_pretrained.zip")
+        if args.backup_dir and os.path.exists(os.path.join(args.backup_dir, "ppo_bc_pretrained.zip")):
+            import shutil
+            os.makedirs(args.save_dir, exist_ok=True)
+            shutil.copy2(os.path.join(args.backup_dir, "ppo_bc_pretrained.zip"), bc_path)
+
+        if args.warm_start and not os.path.exists(bc_path):
+            print("\n🎓 [Warm-Start] Pre-training policy network on HeuristicBot demonstrations (60s)...")
+            from src.training.pretrain_bc import pretrain_policy
+            pretrain_policy(
+                output_path=bc_path,
+                num_samples=25000,
+                epochs=6,
+                config_path=args.config,
+                env_config_path=args.env_config,
+                device=device,
+                seed=args.seed,
+            )
+            if args.backup_dir and os.path.exists(args.backup_dir):
+                try:
+                    import shutil
+                    shutil.copy2(bc_path, os.path.join(args.backup_dir, "ppo_bc_pretrained.zip"))
+                except Exception:
+                    pass
+
+        if os.path.exists(bc_path):
+            print(f"\n🚀 Initializing PPO from warm-started BC policy: {bc_path}")
+            model = PPO.load(
+                bc_path,
+                env=vec_env,
+                device=device,
+                tensorboard_log=tb_log,
+                learning_rate=lr,
+                n_steps=n_steps,
+                batch_size=batch_size,
+                n_epochs=n_epochs,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                ent_coef=ent_coef,
+                vf_coef=0.5,
+                max_grad_norm=0.5,
+            )
         else:
             print("\n🚀 Starting fresh PPO training from scratch (V3 MultiDiscrete SOTA architecture).")
-        model = PPO(
-            policy="MlpPolicy",
-            env=vec_env,
-            learning_rate=lr,
-            n_steps=n_steps,
-            batch_size=batch_size,
-            n_epochs=n_epochs,
-            gamma=gamma,
-            gae_lambda=gae_lambda,
-            ent_coef=ent_coef,
-            vf_coef=0.5,
-            max_grad_norm=0.5,
-            policy_kwargs=policy_kwargs,
-            tensorboard_log=tb_log,
-            verbose=1,
-            device=device,
-        )
+            model = PPO(
+                policy="MlpPolicy",
+                env=vec_env,
+                learning_rate=lr,
+                n_steps=n_steps,
+                batch_size=batch_size,
+                n_epochs=n_epochs,
+                gamma=gamma,
+                gae_lambda=gae_lambda,
+                ent_coef=ent_coef,
+                vf_coef=0.5,
+                max_grad_norm=0.5,
+                policy_kwargs=policy_kwargs,
+                tensorboard_log=tb_log,
+                verbose=1,
+                device=device,
+            )
 
     # Self-Play Callback
     self_play_callback = SelfPlayCallback(
@@ -275,6 +319,7 @@ def main():
         update_interval_steps=args.pool_interval,
         save_dir=args.save_dir,
         log_interval_steps=5_000,
+        min_pool_step=args.min_pool_step,
         backup_dir=args.backup_dir,
         verbose=1,
     )
