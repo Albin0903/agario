@@ -19,6 +19,7 @@ class SelfPlayCallback(BaseCallback):
         update_interval_steps: int = 500_000,
         save_dir: str = "checkpoints/ppo",
         log_interval_steps: int = 10_000,
+        backup_dir: Optional[str] = None,
         verbose: int = 1,
     ):
         super().__init__(verbose)
@@ -26,6 +27,7 @@ class SelfPlayCallback(BaseCallback):
         self.update_interval_steps = update_interval_steps
         self.save_dir = save_dir
         self.log_interval_steps = log_interval_steps
+        self.backup_dir = backup_dir
 
         self.last_pool_update = 0
         self.last_log_step = 0
@@ -103,6 +105,17 @@ class SelfPlayCallback(BaseCallback):
             # Also maintain latest in save_dir
             latest_path = os.path.join(self.save_dir, "ppo_latest.zip")
             self.model.save(latest_path)
+
+            if self.backup_dir:
+                try:
+                    import shutil
+                    os.makedirs(self.backup_dir, exist_ok=True)
+                    shutil.copy2(checkpoint_path, os.path.join(self.backup_dir, checkpoint_filename))
+                    shutil.copy2(latest_path, os.path.join(self.backup_dir, "ppo_latest.zip"))
+                    if self.verbose > 0:
+                        print(f"📁 [Drive Backup] Checkpoint mirrored to {self.backup_dir}")
+                except Exception as e:
+                    print(f"⚠️ [Drive Backup] Warning: Could not mirror checkpoint: {e}")
 
             if self.verbose > 0:
                 print(f"[SelfPlayCallback] Checkpoint saved: {checkpoint_path}")

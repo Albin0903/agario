@@ -109,7 +109,8 @@ def parse_args():
     parser.add_argument("--device", type=str, default="auto", help="Device ('cpu', 'cuda', 'auto')")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
     parser.add_argument("--use-dummy-vec", action="store_true", help="Force DummyVecEnv instead of SubprocVecEnv")
-    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume training from")
+    parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume from, or 'auto'")
+    parser.add_argument("--backup-dir", type=str, default=None, help="Directory to mirror checkpoints to (e.g. Google Drive)")
     return parser.parse_args()
 
 
@@ -187,15 +188,54 @@ def main():
     except ImportError:
         tb_log = None
 
-    if args.resume and os.path.exists(args.resume):
-        print(f"\nResuming PPO model from checkpoint: {args.resume}")
+    # Restore existing checkpoints from backup-dir if available
+    if args.backup_dir and os.path.exists(args.backup_dir):
+        import shutil, glob
+        os.makedirs(args.history_dir, exist_ok=True)
+        drive_zips = glob.glob(os.path.join(args.backup_dir, "*.zip"))
+        if drive_zips:
+            print(f"📁 [Drive Backup] Restoring {len(drive_zips)} checkpoints from Drive to local pool...")
+            for dz in drive_zips:
+                dest = os.path.join(args.history_dir, os.path.basename(dz))
+                if not os.path.exists(dest):
+                    shutil.copy2(dz, dest)
+            pool.sync_from_disk()
+
+    # Resolve checkpoint to resume from
+    resume_path = None
+    if args.resume:
+        if args.resume == "auto":
+            candidates = []
+            if os.path.exists(os.path.join(args.save_dir, "ppo_latest.zip")):
+                candidates.append(os.path.join(args.save_dir, "ppo_latest.zip"))
+            if args.backup_dir and os.path.exists(os.path.join(args.backup_dir, "ppo_latest.zip")):
+                candidates.append(os.path.join(args.backup_dir, "ppo_latest.zip"))
+            import glob
+            pool_ckpts = sorted(glob.glob(os.path.join(args.history_dir, "*.zip")))
+            if pool_ckpts:
+                candidates.append(pool_ckpts[-1])
+            if args.backup_dir:
+                drive_ckpts = sorted(glob.glob(os.path.join(args.backup_dir, "*.zip")))
+                if drive_ckpts:
+                    candidates.append(drive_ckpts[-1])
+            if candidates:
+                resume_path = candidates[0]
+        elif os.path.exists(args.resume):
+            resume_path = args.resume
+        elif args.backup_dir and os.path.exists(os.path.join(args.backup_dir, os.path.basename(args.resume))):
+            resume_path = os.path.join(args.backup_dir, os.path.basename(args.resume))
+
+    if resume_path and os.path.exists(resume_path):
+        print(f"\nResuming PPO model from checkpoint: {resume_path}")
         model = PPO.load(
-            args.resume,
+            resume_path,
             env=vec_env,
             device=device,
             tensorboard_log=tb_log,
         )
     else:
+        if args.resume:
+            print(f"\n⚠️ Checkpoint '{args.resume}' not found. Starting fresh PPO training from scratch.")
         model = PPO(
             policy="MlpPolicy",
             env=vec_env,
@@ -219,6 +259,7 @@ def main():
         update_interval_steps=args.pool_interval,
         save_dir=args.save_dir,
         log_interval_steps=5_000,
+        backup_dir=args.backup_dir,
         verbose=1,
     )
 
@@ -236,6 +277,15 @@ def main():
     final_path = os.path.join(args.save_dir, "ppo_final.zip")
     model.save(final_path)
     print(f"\nTraining complete! Final model saved to: {final_path}")
+
+    if args.backup_dir:
+        try:
+            import shutil
+            os.makedirs(args.backup_dir, exist_ok=True)
+            shutil.copy2(final_path, os.path.join(args.backup_dir, "ppo_final.zip"))
+            print(f"📁 [Drive Backup] Final model mirrored to: {os.path.join(args.backup_dir, 'ppo_final.zip')}")
+        except Exception as e:
+            print(f"⚠️ [Drive Backup] Warning: Could not mirror final model: {e}")
 
     vec_env.close()
 
