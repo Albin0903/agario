@@ -27,7 +27,7 @@ self_play:
   max_pool_size: 20
   history_dir: "checkpoints/self_play_pool"
   save_dir: "checkpoints/ppo"
-  heuristic_opponent_ratio: 0.3   # 30% heuristic, 40% latest clone, 30% archives (Guide Section 2.A)
+  heuristic_opponent_ratio: 0.5   # 50% disciplined heuristic, 50% self-play pool
 
 training:
   n_envs: 24                    # 24 vectorized environments for parallel CPU rollouts

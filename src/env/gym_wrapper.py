@@ -30,8 +30,12 @@ class HeuristicBot:
     def __init__(self, player_id: int, rng: Optional[np.random.Generator] = None):
         self.player_id = player_id
         self.rng = rng if rng is not None else np.random.default_rng()
+        self.split_cooldown = 0
 
     def get_action(self, engine: AgarEngine) -> np.ndarray:
+        if self.split_cooldown > 0:
+            self.split_cooldown -= 1
+
         p_cells = engine.get_player_cells(self.player_id)
         if not p_cells:
             return np.array([0.0, 0.0, -1.0], dtype=np.float32)
@@ -64,19 +68,33 @@ class HeuristicBot:
         threat_norm = math.hypot(threat_x, threat_y)
         virus_norm = math.hypot(virus_avoid_x, virus_avoid_y)
 
+        # 1. Primary instinct: Flee from predators
         if threat_norm > 1e-4:
             return np.array([threat_x / threat_norm, threat_y / threat_norm, -1.0], dtype=np.float32)
 
+        # 2. Avoid popping on viruses
         if virus_norm > 1e-4:
             return np.array([virus_avoid_x / virus_norm, virus_avoid_y / virus_norm, -1.0], dtype=np.float32)
 
-        # Tactical Hunt / Split Attack when prey is vulnerable
-        if closest_prey_dist < 280.0 and my_mass >= 2.0 * closest_prey_mass and my_mass >= 36.0:
-            if len(p_cells) < 8 and self.rng.random() < 0.25:
-                return np.array([prey_dx, prey_dy, 0.8], dtype=np.float32)
+        # 3. Disciplined tactical split: ONLY when completely safe and highly advantageous
+        can_split = (
+            self.split_cooldown == 0
+            and threat_norm < 1e-4
+            and len(p_cells) <= 2
+            and my_mass >= 60.0
+            and 120.0 < closest_prey_dist < 240.0
+            and my_mass >= 2.5 * closest_prey_mass
+            and self.rng.random() < 0.08
+        )
+        if can_split:
+            self.split_cooldown = 150  # 5-second cooldown at 30Hz
+            return np.array([prey_dx, prey_dy, 0.8], dtype=np.float32)
+
+        # 4. Normal prey pursuit without splitting
+        if closest_prey_dist < 320.0 and my_mass >= 1.2 * closest_prey_mass:
             return np.array([prey_dx, prey_dy, -1.0], dtype=np.float32)
 
-        # Forage nearest pellet
+        # 5. Forage nearest pellet
         found, p_dx, p_dy = find_single_nearest_pellet_numba(cx, cy, engine.pellets_xy, max_dist=min(view_r, 350.0))
         if found:
             return np.array([p_dx, p_dy, -1.0], dtype=np.float32)
@@ -127,11 +145,12 @@ class AgarEnv(gym.Env):
                 dtype=np.float32,
             )
 
-        # SOTA Minimalist Reward formulation (AgarCL / AgarIA standard)
+        # SOTA Survival-First Reward formulation
         rewards_cfg = cfg.get("rewards", {})
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
         self.eat_cell_reward = float(rewards_cfg.get("kill_reward", rewards_cfg.get("eat_cell_reward", 10.0)))
-        self.death_penalty_max = float(rewards_cfg.get("death_penalty_max", 5.0))
+        self.death_penalty_base = float(rewards_cfg.get("death_penalty_base", 25.0))
+        self.survival_reward_scale = float(rewards_cfg.get("survival_reward_scale", 0.02))
         self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.05))
 
         self.action_repeat = int(sim_cfg.get("action_repeat", 3))
@@ -243,20 +262,26 @@ class AgarEnv(gym.Env):
         total_splits = 0
         died = False
 
+        # Query bot macro-actions ONCE per step for all active bots (3x speedup)
+        actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: engine_action}
+        for bot_id in range(1, self.num_bots + 1):
+            if not self.engine.get_player_cells(bot_id):
+                self.engine.spawn_player(bot_id, initial_mass=self.initial_player_mass)
+            if self.opponent_policy_fn is not None:
+                bot_act = self.opponent_policy_fn(bot_id, self.engine)
+            else:
+                bot_act = self.heuristic_bots[bot_id].get_action(self.engine)
+            actions_dict[bot_id] = self.parse_action(bot_act)
+
+        # Prepare sub-tick actions (reset split trigger on ticks 1+ to prevent multi-split within same macro-step)
+        subtick_actions: Dict[int, np.ndarray] = {}
+        for pid, act in actions_dict.items():
+            subtick_actions[pid] = np.array([act[0], act[1], -1.0], dtype=np.float32)
+
         # Execute physics sub-ticks for action persistence / macro-action
-        for _ in range(self.action_repeat):
-            actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: engine_action}
-
-            for bot_id in range(1, self.num_bots + 1):
-                if not self.engine.get_player_cells(bot_id):
-                    self.engine.spawn_player(bot_id, initial_mass=self.initial_player_mass)
-                if self.opponent_policy_fn is not None:
-                    bot_act = self.opponent_policy_fn(bot_id, self.engine)
-                else:
-                    bot_act = self.heuristic_bots[bot_id].get_action(self.engine)
-                actions_dict[bot_id] = self.parse_action(bot_act)
-
-            events = self.engine.step(actions_dict)
+        for tick_idx in range(self.action_repeat):
+            step_actions = actions_dict if tick_idx == 0 else subtick_actions
+            events = self.engine.step(step_actions)
             player_events = events.get(self.learning_player_id, {})
             total_cells_eaten += player_events.get("cells_eaten", 0)
             total_pellets_eaten += player_events.get("pellets_eaten", 0)
@@ -271,22 +296,31 @@ class AgarEnv(gym.Env):
         self.total_cells_eaten += total_cells_eaten
         self.episode_pellets_total += total_pellets_eaten
 
-        # SOTA Hybrid Reward: Sparse Growth/Kill + Dense PBRS Foraging
-        # 1. Normalized mass gain (strictly positive on eating pellets or cells)
+        # SOTA Survival-First Reward:
+        # 1. Survival Drip: Being alive is the core objective.
+        # Zero reward for camping at mass 20; increases with mass (larger mass = greater security & higher drip).
+        r_survival = 0.0
+        if not died and current_mass > self.initial_player_mass:
+            mass_surplus = (current_mass - self.initial_player_mass) / 100.0
+            r_survival = float(self.survival_reward_scale * min(5.0, mass_surplus))
+
+        # 2. Normalized mass gain (reward for eating and expanding)
         delta_mass = current_mass - self.prev_mass
         r_growth = (delta_mass / self.initial_player_mass) * self.mass_scale
 
-        # 2. Direct combat payoff for eating an opponent
+        # 3. Combat payoff for eating an opponent
         r_kill = self.eat_cell_reward * float(total_cells_eaten)
 
-        # 3. Moderate death penalty (never paralyzing)
-        r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
+        # 4. Severe Death Penalty (Dying wipes out accumulated gains, Never profitable)
+        r_death = 0.0
+        if died:
+            r_death = -float(self.death_penalty_base + min(25.0, self.prev_mass / 50.0))
 
         # Build next observation (also updates self._last_pellet_dist)
         obs = self._build_observation()
         curr_pellet_dist = self._last_pellet_dist
 
-        # 4. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging
+        # 5. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging
         r_forage = 0.0
         if not died and self.prev_pellet_dist > 0 and curr_pellet_dist > 0:
             if total_pellets_eaten > 0:
@@ -300,7 +334,7 @@ class AgarEnv(gym.Env):
         self.prev_pellet_dist = curr_pellet_dist
         self.prev_mass = current_mass
 
-        reward = float(r_growth + r_kill + r_death + r_forage)
+        reward = float(r_survival + r_growth + r_kill + r_death + r_forage)
 
         terminated = bool(died)
         truncated = bool(self.current_step >= self.max_steps)
