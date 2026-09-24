@@ -5,6 +5,7 @@ import math
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from src.env.entities import mass_to_radius, mass_to_speed, Pellet, Virus, Cell, EjectedMass
+from src.env.physics_fast import check_pellet_collisions_numba, spawn_pellet_coords_fast
 
 
 class SpatialHashGrid:
@@ -148,6 +149,23 @@ class AgarEngine:
         self._next_cell_id = 1
         self._next_ejected_id = 1
 
+        # Entity cache for ultra-fast bot queries and step processing
+        self._cells_cache_valid = False
+        self._player_cells_cache: Dict[int, List[Cell]] = {}
+        self._player_mass_cache: Dict[int, float] = {}
+        self._player_centroid_cache: Dict[int, Tuple[float, float, float]] = {}
+
+        # Preallocated buffers for zero-allocation cell arrays
+        self._cells_buf_cap = 256
+        self._cells_xy_buf = np.empty((self._cells_buf_cap, 2), dtype=np.float32)
+        self._cells_mass_buf = np.empty(self._cells_buf_cap, dtype=np.float32)
+        self._cells_pid_buf = np.empty(self._cells_buf_cap, dtype=np.int32)
+        self._cells_r_buf = np.empty(self._cells_buf_cap, dtype=np.float32)
+        self.cells_xy: np.ndarray = self._cells_xy_buf[:0]
+        self.cells_mass: np.ndarray = self._cells_mass_buf[:0]
+        self.cells_pid: np.ndarray = self._cells_pid_buf[:0]
+        self.cells_r: np.ndarray = self._cells_r_buf[:0]
+
         # Event tracking per step
         self.step_events: Dict[int, Dict[str, Any]] = {}
 
@@ -155,6 +173,16 @@ class AgarEngine:
 
     def _spawn_pellet_coords(self, count: int) -> Tuple[np.ndarray, np.ndarray]:
         """Generate pellet coordinates with high-density halos concentrated around viruses."""
+        if count == 0:
+            return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32)
+
+        # Ultra-fast path for incremental step-by-step pellet respawns
+        if count < 100 and self.num_viruses > 0 and len(self.viruses_xy) > 0:
+            rfloats = self.rng.random(count * 8, dtype=np.float32)
+            return spawn_pellet_coords_fast(
+                count, float(self.width), float(self.height), self.viruses_xy, 28.0, rfloats
+            )
+
         xs = np.zeros(count, dtype=np.float32)
         ys = np.zeros(count, dtype=np.float32)
 
@@ -241,6 +269,7 @@ class AgarEngine:
         self._next_cell_id = 1
         self._next_ejected_id = 1
         self.step_events.clear()
+        self._cells_cache_valid = False
 
     def spawn_player(self, player_id: int, initial_mass: float = 20.0, xy: Optional[Tuple[float, float]] = None) -> Cell:
         """Spawn an initial single cell for a player."""
@@ -264,30 +293,64 @@ class AgarEngine:
         )
         self._next_cell_id += 1
         self.cells.append(cell)
+        self._cells_cache_valid = False
         return cell
 
+    def _refresh_player_cache(self) -> None:
+        """Refresh dictionary lookups for active player cells and centroids."""
+        if self._cells_cache_valid:
+            return
+        self._player_cells_cache.clear()
+        self._player_mass_cache.clear()
+        self._player_centroid_cache.clear()
+
+        n = len(self.cells)
+        if n > self._cells_buf_cap:
+            self._cells_buf_cap = max(n * 2, 256)
+            self._cells_xy_buf = np.empty((self._cells_buf_cap, 2), dtype=np.float32)
+            self._cells_mass_buf = np.empty(self._cells_buf_cap, dtype=np.float32)
+            self._cells_pid_buf = np.empty(self._cells_buf_cap, dtype=np.int32)
+            self._cells_r_buf = np.empty(self._cells_buf_cap, dtype=np.float32)
+
+        for i, c in enumerate(self.cells):
+            self._player_cells_cache.setdefault(c.player_id, []).append(c)
+            self._cells_xy_buf[i, 0] = c.x
+            self._cells_xy_buf[i, 1] = c.y
+            self._cells_mass_buf[i] = c.mass
+            self._cells_pid_buf[i] = c.player_id
+            self._cells_r_buf[i] = c.radius
+
+        self.cells_xy = self._cells_xy_buf[:n]
+        self.cells_mass = self._cells_mass_buf[:n]
+        self.cells_pid = self._cells_pid_buf[:n]
+        self.cells_r = self._cells_r_buf[:n]
+
+        for pid, p_cells in self._player_cells_cache.items():
+            tot_mass = sum(c.mass for c in p_cells)
+            self._player_mass_cache[pid] = tot_mass
+            if tot_mass > 0:
+                cx = sum(c.x * c.mass for c in p_cells) / tot_mass
+                cy = sum(c.y * c.mass for c in p_cells) / tot_mass
+                eff_radius = mass_to_radius(tot_mass, scale=self.radius_scale)
+            else:
+                cx, cy, eff_radius = p_cells[0].x, p_cells[0].y, p_cells[0].radius
+            self._player_centroid_cache[pid] = (float(cx), float(cy), float(eff_radius))
+        self._cells_cache_valid = True
+
     def get_player_cells(self, player_id: int) -> List[Cell]:
-        """Return all active cells belonging to a specific player."""
-        return [c for c in self.cells if c.player_id == player_id]
+        """Return all active cells belonging to a specific player (O(1) cached)."""
+        self._refresh_player_cache()
+        return self._player_cells_cache.get(player_id, [])
 
     def get_player_mass(self, player_id: int) -> float:
-        """Compute the total mass of a player across all their subcells."""
-        return sum(c.mass for c in self.cells if c.player_id == player_id)
+        """Compute the total mass of a player across all their subcells (O(1) cached)."""
+        self._refresh_player_cache()
+        return self._player_mass_cache.get(player_id, 0.0)
 
     def get_player_centroid(self, player_id: int) -> Tuple[float, float, float]:
-        """Compute the mass-weighted centroid (x, y) and effective radius of a player."""
-        p_cells = self.get_player_cells(player_id)
-        if not p_cells:
-            return self.width / 2.0, self.height / 2.0, 10.0
-
-        total_mass = sum(c.mass for c in p_cells)
-        if total_mass <= 0:
-            return p_cells[0].x, p_cells[0].y, p_cells[0].radius
-
-        cx = sum(c.x * c.mass for c in p_cells) / total_mass
-        cy = sum(c.y * c.mass for c in p_cells) / total_mass
-        eff_radius = mass_to_radius(total_mass, scale=self.radius_scale)
-        return float(cx), float(cy), float(eff_radius)
+        """Compute the mass-weighted centroid (x, y) and effective radius of a player (O(1) cached)."""
+        self._refresh_player_cache()
+        return self._player_centroid_cache.get(player_id, (self.width / 2.0, self.height / 2.0, 10.0))
 
     def _compute_remerge_cooldown(self, mass: float) -> int:
         """Compute remerge cooldown ticks based on base ticks and cell mass."""
@@ -358,7 +421,9 @@ class AgarEngine:
                 current_total += 1
                 splits_performed += 1
 
-        self.cells.extend(new_cells)
+        if new_cells:
+            self.cells.extend(new_cells)
+            self._cells_cache_valid = False
         return splits_performed
 
     def _execute_eject(self, player_id: int, target_raw: np.ndarray) -> int:
@@ -448,6 +513,7 @@ class AgarEngine:
             )
             self._next_cell_id += 1
             self.cells.append(frag)
+        self._cells_cache_valid = False
 
     def step(self, actions: Dict[int, np.ndarray]) -> Dict[int, Dict[str, Any]]:
         """Advance the physics simulation by 1 step (vectorized).
@@ -574,6 +640,8 @@ class AgarEngine:
             elif ny > self.height - r: cell.y = self.height - r
             else: cell.y = ny
 
+        self._cells_cache_valid = False
+
         # 3. Update ejected mass movements
         if self.ejected:
             surviving_ejected: List[EjectedMass] = []
@@ -696,44 +764,36 @@ class AgarEngine:
                     surviving.append(c)
 
         self.cells = surviving
+        self._cells_cache_valid = False
 
     def _resolve_pellet_collisions(self) -> None:
-        """Vectorized pellet consumption using spatial hash grid queries."""
+        """High-performance vectorized pellet consumption using Numba JIT."""
         if not self.cells:
             return
 
-        pellets_respawn_idx: List[int] = []
+        self._refresh_player_cache()
+        pellet_eaten_by, cell_counts = check_pellet_collisions_numba(
+            self.pellets_xy, self.cells_xy, self.cells_r
+        )
 
-        # Query candidates for each cell
-        for cell in self.cells:
-            candidates = self.spatial_grid.query_circle(cell.x, cell.y, cell.radius)
-            if not candidates:
-                continue
+        eaten_pellet_indices = np.where(pellet_eaten_by >= 0)[0]
+        if len(eaten_pellet_indices) == 0:
+            return
 
-            cand_idx = np.array(candidates, dtype=np.int32)
-            cand_xy = self.pellets_xy[cand_idx]
-            dx = cand_xy[:, 0] - cell.x
-            dy = cand_xy[:, 1] - cell.y
-            dist_sq = dx * dx + dy * dy
-            r_sq = cell.radius * cell.radius
-
-            eaten_mask = dist_sq < r_sq
-            eaten_indices = cand_idx[eaten_mask]
-
-            if len(eaten_indices) > 0:
-                num_eaten = len(eaten_indices)
-                cell.mass += num_eaten * self.pellet_mass
-                self.step_events[cell.player_id]["pellets_eaten"] += num_eaten
-                pellets_respawn_idx.extend(eaten_indices.tolist())
+        for i, c in enumerate(self.cells):
+            count = int(cell_counts[i])
+            if count > 0:
+                c.mass += count * self.pellet_mass
+                self.step_events[c.player_id]["pellets_eaten"] += count
 
         # Vectorized instant respawn of eaten pellets with virus halo clustering
-        if pellets_respawn_idx:
-            unique_respawn = np.unique(pellets_respawn_idx)
-            new_x, new_y = self._spawn_pellet_coords(len(unique_respawn))
-            self.pellets_xy[unique_respawn, 0] = new_x
-            self.pellets_xy[unique_respawn, 1] = new_y
-            for idx, nx, ny in zip(unique_respawn, new_x, new_y):
-                self.spatial_grid.update_pellet(int(idx), float(nx), float(ny))
+        new_x, new_y = self._spawn_pellet_coords(len(eaten_pellet_indices))
+        self.pellets_xy[eaten_pellet_indices, 0] = new_x
+        self.pellets_xy[eaten_pellet_indices, 1] = new_y
+        for idx, nx, ny in zip(eaten_pellet_indices, new_x, new_y):
+            self.spatial_grid.update_pellet(int(idx), float(nx), float(ny))
+
+        self._cells_cache_valid = False
 
     def _resolve_ejected_collisions(self) -> None:
         """Resolve consumption of ejected mass fragments by cells and viruses."""
@@ -889,3 +949,4 @@ class AgarEngine:
 
         if eaten_indices:
             self.cells = [c for idx, c in enumerate(self.cells) if idx not in eaten_indices]
+            self._cells_cache_valid = False

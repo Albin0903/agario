@@ -17,6 +17,11 @@ from gymnasium import spaces
 
 from src.env.agar_engine import AgarEngine
 from src.env.entities import mass_to_radius
+from src.env.physics_fast import (
+    find_nearest_pellets_numba,
+    find_single_nearest_pellet_numba,
+    compute_heuristic_threat_prey,
+)
 
 
 class HeuristicBot:
@@ -35,71 +40,48 @@ class HeuristicBot:
         my_mass = engine.get_player_mass(self.player_id)
         view_r = 500.0 + 2.0 * cr
 
-        threat_vec = np.zeros(2, dtype=np.float32)
-        prey_vec = np.zeros(2, dtype=np.float32)
-        closest_prey_dist = 1e9
-        closest_prey_mass = 0.0
-
-        for other_cell in engine.cells:
-            if other_cell.player_id == self.player_id:
-                continue
-            dx = other_cell.x - cx
-            dy = other_cell.y - cy
-            dist = math.hypot(dx, dy)
-            if dist > view_r or dist < 1e-4:
-                continue
-
-            if other_cell.mass >= 1.1 * my_mass:
-                weight = 1.0 / max(30.0, dist)
-                threat_vec[0] -= (dx / dist) * weight
-                threat_vec[1] -= (dy / dist) * weight
-            elif other_cell.mass <= 0.9 * my_mass:
-                if dist < closest_prey_dist:
-                    closest_prey_dist = dist
-                    closest_prey_mass = other_cell.mass
-                    prey_vec[0] = dx / dist
-                    prey_vec[1] = dy / dist
+        threat_x, threat_y, prey_dx, prey_dy, closest_prey_dist, closest_prey_mass = compute_heuristic_threat_prey(
+            cx, cy, cr, my_mass, engine.cells_xy, engine.cells_mass, engine.cells_pid, self.player_id, view_r
+        )
 
         # Avoid viruses if mass > 130
-        virus_avoid_vec = np.zeros(2, dtype=np.float32)
-        if my_mass > 130.0:
-            for vx, vy in engine.viruses_xy:
+        virus_avoid_x = 0.0
+        virus_avoid_y = 0.0
+        if my_mass > 130.0 and len(engine.viruses_xy) > 0:
+            for v in range(len(engine.viruses_xy)):
+                vx = engine.viruses_xy[v, 0]
+                vy = engine.viruses_xy[v, 1]
                 v_dx = vx - cx
-                v_dy = vy - cy
-                v_dist = math.hypot(v_dx, v_dy)
-                if v_dist < (cr + 50.0) and v_dist > 1e-4:
-                    virus_avoid_vec[0] -= (v_dx / v_dist) * (1.0 / max(10.0, v_dist))
-                    virus_avoid_vec[1] -= (v_dy / v_dist) * (1.0 / max(10.0, v_dist))
+                if abs(v_dx) < (cr + 50.0):
+                    v_dy = vy - cy
+                    if abs(v_dy) < (cr + 50.0):
+                        v_dist = math.hypot(v_dx, v_dy)
+                        if 1e-4 < v_dist < (cr + 50.0):
+                            w = 1.0 / max(10.0, v_dist)
+                            virus_avoid_x -= (v_dx / v_dist) * w
+                            virus_avoid_y -= (v_dy / v_dist) * w
 
-        threat_norm = np.linalg.norm(threat_vec)
-        virus_norm = np.linalg.norm(virus_avoid_vec)
+        threat_norm = math.hypot(threat_x, threat_y)
+        virus_norm = math.hypot(virus_avoid_x, virus_avoid_y)
 
         if threat_norm > 1e-4:
-            move_dir = threat_vec / threat_norm
-            return np.array([move_dir[0], move_dir[1], -1.0], dtype=np.float32)
+            return np.array([threat_x / threat_norm, threat_y / threat_norm, -1.0], dtype=np.float32)
 
         if virus_norm > 1e-4:
-            move_dir = virus_avoid_vec / virus_norm
-            return np.array([move_dir[0], move_dir[1], -1.0], dtype=np.float32)
+            return np.array([virus_avoid_x / virus_norm, virus_avoid_y / virus_norm, -1.0], dtype=np.float32)
 
         # Tactical Hunt / Split Attack when prey is vulnerable
         if closest_prey_dist < 280.0 and my_mass >= 2.0 * closest_prey_mass and my_mass >= 36.0:
             if len(p_cells) < 8 and self.rng.random() < 0.25:
-                return np.array([prey_vec[0], prey_vec[1], 0.8], dtype=np.float32)
-            return np.array([prey_vec[0], prey_vec[1], -1.0], dtype=np.float32)
+                return np.array([prey_dx, prey_dy, 0.8], dtype=np.float32)
+            return np.array([prey_dx, prey_dy, -1.0], dtype=np.float32)
 
         # Forage nearest pellet
-        cand = engine.spatial_grid.query_circle(cx, cy, min(view_r, 350.0))
-        if cand:
-            c_xy = engine.pellets_xy[cand]
-            dists = np.hypot(c_xy[:, 0] - cx, c_xy[:, 1] - cy)
-            closest_idx = np.argmin(dists)
-            p_dx = c_xy[closest_idx, 0] - cx
-            p_dy = c_xy[closest_idx, 1] - cy
-            p_dist = max(1e-4, dists[closest_idx])
-            return np.array([p_dx / p_dist, p_dy / p_dist, -1.0], dtype=np.float32)
+        found, p_dx, p_dy = find_single_nearest_pellet_numba(cx, cy, engine.pellets_xy, max_dist=min(view_r, 350.0))
+        if found:
+            return np.array([p_dx, p_dy, -1.0], dtype=np.float32)
 
-        ang = self.rng.uniform(0, 2 * np.pi)
+        ang = float(self.rng.uniform(0.0, 2.0 * math.pi))
         return np.array([math.cos(ang), math.sin(ang), -1.0], dtype=np.float32)
 
 
@@ -348,21 +330,8 @@ class AgarEnv(gym.Env):
         obs[2] = float(np.clip(avg_vy / self.v_max, -1.0, 1.0))
         obs[3] = float(np.clip(len(my_cells) / 16.0, 0.0, 1.0))
 
-        # 2. 10 nearest Pellets (20 floats) -> offset 4 to 24
-        cand_pellets = self.engine.spatial_grid.query_circle(cx, cy, view_r)
-        if cand_pellets:
-            p_xy = self.engine.pellets_xy[cand_pellets]
-            p_dx = p_xy[:, 0] - cx
-            p_dy = p_xy[:, 1] - cy
-            p_dists = np.hypot(p_dx, p_dy)
-            within_view = p_dists <= view_r
-            if np.any(within_view):
-                valid_idx = np.where(within_view)[0]
-                sorted_idx = valid_idx[np.argsort(p_dists[valid_idx])][:10]
-                for i, idx in enumerate(sorted_idx):
-                    base = 4 + i * 2
-                    obs[base] = float(np.clip(p_dx[idx] / view_r, -1.0, 1.0))
-                    obs[base + 1] = float(np.clip(p_dy[idx] / view_r, -1.0, 1.0))
+        # 2. 10 nearest Pellets (20 floats) -> offset 4 to 24 (compiled Numba JIT)
+        obs[4:24] = find_nearest_pellets_numba(cx, cy, self.engine.pellets_xy, view_r, k=10)
 
         # Separate preys and predators among other cells
         preys: List[Tuple[float, float, float, float, float]] = []

@@ -1,10 +1,10 @@
 # AGAR-RL PPO & Self-Play Configuration
-# High-Throughput L4 GPU Configuration (~2 to 3h training run)
+# High-Throughput L4 GPU Maximized Configuration (Option 2 + Option 3)
 
 ppo:
   learning_rate: 0.0003
   n_steps: 2048                 # Horizon per worker = 2048 (Guide Section 6)
-  batch_size: 512               # Stable mini-batch
+  batch_size: 1024              # Maximize L4 tensor core utilization
   n_epochs: 8                   # Epochs per rollout
   gamma: 0.99                   # Discount factor for long-term survival
   gae_lambda: 0.95
@@ -14,12 +14,12 @@ ppo:
   ent_coef: 0.01                # Sustained exploration
   vf_coef: 0.5
   max_grad_norm: 0.5
-  total_timesteps: 15000000     # 15M timesteps (~2h15 on GPU L4 @ 1800 FPS)
+  total_timesteps: 15000000     # 15M timesteps (~30-40 min on GPU L4 @ 6000-8000 FPS)
 
 policy:
   net_arch:
-    pi: [512, 512]
-    vf: [512, 512]
+    pi: [512, 512, 512]         # Deep 3x512 representation for spatial reasoning
+    vf: [512, 512, 512]
   activation_fn: "ReLU"
 
 self_play:
@@ -30,7 +30,7 @@ self_play:
   heuristic_opponent_ratio: 0.3   # 30% heuristic, 40% latest clone, 30% archives (Guide Section 2.A)
 
 training:
-  n_envs: 16
+  n_envs: 24                    # 24 vectorized environments for parallel CPU rollouts
   eval_freq: 25000
   eval_episodes: 5
   seed: 42
