@@ -470,6 +470,7 @@ class AgarEngine:
                 "died": False,
                 "splits": 0,
                 "ejects": 0,
+                "virus_exploded": False,
             }
             for pid in unique_players
         }
@@ -830,6 +831,7 @@ class AgarEngine:
             for c_idx, cell in enumerate(list(self.cells)):
                 if c_idx < len(dist_sq) and dist_sq[c_idx] < cell_r_sq[c_idx]:
                     if cell.mass > self.virus_split_threshold:
+                        self.step_events[cell.player_id]["virus_exploded"] = True
                         self._explode_cell_on_virus(cell)
                         self.viruses_xy[v_idx, 0] = float(self.rng.uniform(100.0, self.width - 100.0))
                         self.viruses_xy[v_idx, 1] = float(self.rng.uniform(100.0, self.height - 100.0))

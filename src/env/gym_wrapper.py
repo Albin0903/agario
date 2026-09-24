@@ -271,18 +271,36 @@ class AgarEnv(gym.Env):
         r_invalid = 0.0
         r_tactical_split = 0.0
 
-        if trig > 0.6:
+        # Disable useless mass ejection in solo FFA (prevents wasting mass at tiny sizes)
+        if 0.2 < trig <= 0.6:
+            action[2] = -1.0
+
+        if trig > 0.5:
             if pre_mass < 36.0:
                 # Attempting to split when smaller than official Agar.io min mass (36)
+                action[2] = -1.0  # Mask action: no-op
                 r_invalid -= 0.5
             else:
-                # Check split direction for suicide split vs hunt split
                 cx_pre, cy_pre, _ = self.engine.get_player_centroid(self.learning_player_id)
                 m_norm = math.hypot(action[0], action[1])
                 s_dx = (action[0] / m_norm) if m_norm > 1e-5 else 1.0
                 s_dy = (action[1] / m_norm) if m_norm > 1e-5 else 0.0
                 split_half = pre_mass / 2.0
 
+                # 1. Anti-virus split: check if splitting towards a virus when mass > 130
+                if pre_mass > self.engine.virus_split_threshold:
+                    for vx, vy in self.engine.viruses_xy:
+                        vdx = vx - cx_pre
+                        vdy = vy - cy_pre
+                        vdist = math.hypot(vdx, vdy)
+                        if 0 < vdist < 320.0:
+                            v_dot = (vdx * s_dx + vdy * s_dy) / vdist
+                            if v_dot > 0.55:
+                                # Suicidal split directly towards a green virus!
+                                r_tactical_split -= 12.0
+                                break
+
+                # 2. Check split direction for suicide split vs hunt split on opponents
                 for other_cell in self.engine.cells:
                     if other_cell.player_id == self.learning_player_id:
                         continue
@@ -300,9 +318,6 @@ class AgarEnv(gym.Env):
                                 # Rewarding tactical split onto smaller prey
                                 r_tactical_split += 2.5
                                 break
-        elif 0.2 < trig <= 0.6 and pre_mass < 32.0:
-            # Attempting to eject mass when too small
-            r_invalid -= 0.3
 
         # Prepare actions dictionary for all active players
         actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: action}
@@ -400,21 +415,43 @@ class AgarEnv(gym.Env):
                             r_danger -= float(0.4 * heading * danger_ratio)
                         break
 
-        # Arena boundary wall danger & corner trap penalty
+        # Virus disaster penalty & continuous proximity repulsion when vulnerable
+        r_virus = 0.0
+        if player_events.get("virus_exploded", False):
+            r_virus -= 30.0  # Massive penalty for popping on a virus!
+
+        if not died and current_mass > self.engine.virus_split_threshold and len(learning_cells) > 0:
+            cx_v, cy_v, cr_v = self.engine.get_player_centroid(self.learning_player_id)
+            for vx, vy in self.engine.viruses_xy:
+                vdist = math.hypot(vx - cx_v, vy - cy_v)
+                vsafe = cr_v + self.engine.virus_radius + 80.0
+                if vdist < vsafe:
+                    danger_v = (vsafe - vdist) / vsafe
+                    r_virus -= float(0.8 * (danger_v ** 2))
+                    break
+
+        # Arena boundary wall danger & corner camping prevention
         r_wall = 0.0
         if not died and len(learning_cells) > 0:
             cx, cy, _ = self.engine.get_player_centroid(self.learning_player_id)
             d_wall = min(cx, cy, self.width - cx, self.height - cy)
-            if d_wall < 70.0:
-                wall_factor = (70.0 - d_wall) / 70.0
-                r_wall -= float(0.15 * wall_factor)
+            if d_wall < 150.0:  # Wide buffer to keep agent circulating in open arena
+                wall_factor = (150.0 - d_wall) / 150.0
+                r_wall -= float(0.20 * wall_factor)
+
+                # Corner camping penalty: two walls simultaneously close (< 130)
+                in_corner_x = (cx < 130.0 or cx > self.width - 130.0)
+                in_corner_y = (cy < 130.0 or cy > self.height - 130.0)
+                if in_corner_x and in_corner_y:
+                    r_wall -= 0.35  # Additional continuous penalty for lingering in corners
+
                 # Corner trap: predator nearby while against wall
                 has_predator_near = any(
                     c.player_id != self.learning_player_id and c.mass >= 1.15 * current_mass and math.hypot(c.x - cx, c.y - cy) < 260.0
                     for c in self.engine.cells
                 )
                 if has_predator_near:
-                    r_wall -= float(0.70 * wall_factor)
+                    r_wall -= float(0.80 * wall_factor)
 
         self.episode_pellets_total += pellets_eaten
 
@@ -428,6 +465,7 @@ class AgarEnv(gym.Env):
             + r_proximity
             + r_danger
             + r_wall
+            + r_virus
             + r_jerk
             + r_invalid
             + r_tactical_split
@@ -553,9 +591,9 @@ class AgarEnv(gym.Env):
             if v_dists[v_idx] <= view_r:
                 obs[base] = float(np.clip(v_dx[v_idx] / view_r, -1.0, 1.0))
                 obs[base + 1] = float(np.clip(v_dy[v_idx] / view_r, -1.0, 1.0))
-                # Collision imminent: mass > 130 and dist < (cr + 50)
-                imminent = 1.0 if (my_mass > 130.0 and v_dists[v_idx] < (cr + 50.0)) else 0.0
-                obs[base + 2] = imminent
+                # Signed threat: -1.0 (lethal mine to avoid) if mass > 130, +1.0 (safe shield) if mass <= 130
+                threat_sign = -1.0 if (my_mass > self.engine.virus_split_threshold) else 1.0
+                obs[base + 2] = threat_sign
 
         # 6. Distances to 4 arena walls (4 floats) -> offset 76 to 80
         # Walls: top (y=height), bottom (y=0), left (x=0), right (x=width)
