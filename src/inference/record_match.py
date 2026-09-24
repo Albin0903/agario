@@ -1,12 +1,10 @@
 """Headless match recorder producing HD MP4 replays with decision vector overlays.
 
-Visualizes:
-- Full arena view with camera smoothly tracking the AI model.
-- Model decision direction vectors (moving, splitting, mass ejecting).
-- Nearest food tracking line (green) & nearest threat warning line (red).
-- Remerge cooldown timers on each individual subcell.
-- Live telemetry HUD (mass, subcells, pellets eaten, cells eaten, action mode).
-- Radar minimap in the corner.
+Uses the EXACT AgarEnv environment from training to guarantee 100% fidelity:
+- Authentic physics (speed, decay, remerge, viruses).
+- Action temporal smoothing (alpha = 0.70).
+- Action masking (split disabled under mass 36, ejection neutralized).
+- Identical bot count and observation normalization.
 """
 
 from __future__ import annotations
@@ -23,11 +21,17 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+
 # Set headless SDL video driver for offscreen rendering
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 
 import pygame
-from src.env.agar_engine import AgarEngine
+import yaml
 from src.env.gym_wrapper import AgarEnv, HeuristicBot
 from src.env.entities import Cell, mass_to_radius
 
@@ -50,7 +54,7 @@ VIRUS_BORDER = (34, 139, 34)
 
 
 class VideoEncoder:
-    """Manages encoding RGB frames into an MP4 video file via ffmpeg or opencv."""
+    """Manages encoding RGB frames into an MP4 video file via OpenCV or ffmpeg."""
 
     def __init__(self, output_path: str, width: int = 1280, height: int = 720, fps: int = 30):
         self.output_path = output_path
@@ -116,7 +120,7 @@ class VideoEncoder:
 
 
 class MatchRecorder:
-    """Simulates an Agar game and renders frames with AI decision vector overlays."""
+    """Renders a match using the authentic training AgarEnv environment."""
 
     def __init__(
         self,
@@ -126,6 +130,7 @@ class MatchRecorder:
         screen_height: int = 720,
         fps: int = 30,
         num_bots: Optional[int] = None,
+        seed: int = 42,
     ):
         pygame.init()
         self.width = screen_width
@@ -135,59 +140,34 @@ class MatchRecorder:
 
         self.surface = pygame.Surface((self.width, self.height))
         self.font = pygame.font.SysFont("Arial", 16, bold=True)
-        self.font_large = pygame.font.SysFont("Arial", 26, bold=True)
+        self.font_large = pygame.font.SysFont("Arial", 24, bold=True)
         self.font_small = pygame.font.SysFont("Arial", 12)
 
-        import yaml
+        # Load environment configuration
         env_cfg: Dict[str, Any] = {}
         cfg_path = os.path.join(ROOT_DIR, "config/env_config.yaml")
         if os.path.exists(cfg_path):
             with open(cfg_path, "r", encoding="utf-8") as f:
                 env_cfg = yaml.safe_load(f) or {}
 
-        arena_w = float(env_cfg.get("arena", {}).get("width", 1200.0))
-        arena_h = float(env_cfg.get("arena", {}).get("height", 1200.0))
-        pellets = int(env_cfg.get("entities", {}).get("num_pellets", 1500))
-        viruses = int(env_cfg.get("entities", {}).get("num_viruses", 6))
-        actual_bots = num_bots if num_bots is not None else int(env_cfg.get("simulation", {}).get("num_bots", 5))
-        self.num_bots = actual_bots
+        if num_bots is not None:
+            env_cfg.setdefault("simulation", {})["num_bots"] = num_bots
 
-        # Authentic engine setup
-        self.engine = AgarEngine(
-            width=arena_w,
-            height=arena_h,
-            num_pellets=pellets,
-            num_viruses=viruses,
-            v_base=float(env_cfg.get("physics", {}).get("v_base", 3.2)),
-            v_min=float(env_cfg.get("physics", {}).get("v_min", 0.8)),
-            remerge_cooldown_ticks=int(env_cfg.get("physics", {}).get("remerge_cooldown_ticks", 600)),
-            remerge_cooldown_mass_factor=float(env_cfg.get("physics", {}).get("remerge_cooldown_mass_factor", 0.5)),
-            mass_decay_rate=float(env_cfg.get("physics", {}).get("mass_decay_rate", 0.00003)),
-        )
+        # Use the EXACT SAME AgarEnv instance as used in training
+        self.env = AgarEnv(config=env_cfg, seed=seed)
+        self.engine = self.env.engine
+        self.ai_player_id = self.env.learning_player_id
 
-        self.env_helper = AgarEnv(config=env_cfg)
-        self.env_helper.engine = self.engine
-
-        self.ai_player_id = 0
-        self.engine.spawn_player(self.ai_player_id, initial_mass=self.env_helper.initial_player_mass)
-
-        self.heuristic_bots = {
-            i: HeuristicBot(i) for i in range(1, actual_bots + 1)
-        }
-        for i in range(1, actual_bots + 1):
-            self.engine.spawn_player(i, initial_mass=self.env_helper.initial_player_mass)
-
-        # Policy loading
+        # Policy loading (SB3 PPO .zip, ONNX .onnx, or Heuristic)
         self.policy_fn = self._load_policy(model_path)
-        self.prev_action = np.zeros(3, dtype=np.float32)
 
         # Camera
-        self.cam_x = arena_w / 2.0
-        self.cam_y = arena_h / 2.0
+        self.cam_x = self.engine.width / 2.0
+        self.cam_y = self.engine.height / 2.0
         self.cam_zoom = 1.0
 
         # Stats
-        self.max_mass_achieved = 25.0
+        self.max_mass_achieved = float(self.env.initial_player_mass)
         self.total_pellets_eaten = 0
         self.total_cells_eaten = 0
         self.total_splits = 0
@@ -195,7 +175,7 @@ class MatchRecorder:
     def _load_policy(self, model_path: Optional[str]):
         """Load PPO or ONNX policy, or fallback to Heuristic."""
         if not model_path or not os.path.exists(model_path):
-            print(f"[MatchRecorder] No model found at '{model_path}'. Using Heuristic policy for AI.")
+            print(f"[MatchRecorder] No model found at '{model_path}'. Using Heuristic policy.")
             bot = HeuristicBot(self.ai_player_id)
             return lambda obs: bot.get_action(self.engine)
 
@@ -242,75 +222,70 @@ class MatchRecorder:
             self.cam_y = self.engine.height / 2.0
             self.cam_zoom = 0.55
 
-    def record(self, steps: int = 800) -> Dict[str, Any]:
-        """Run the match for `steps` frames and write the annotated video."""
+    def record(self, steps: int = 2400) -> Dict[str, Any]:
+        """Run the match for `steps` frames using the exact AgarEnv step logic."""
         encoder = VideoEncoder(self.output_path, self.width, self.height, self.fps)
 
         print(f"[MatchRecorder] Recording match for {steps} steps at {self.fps} FPS...")
-        self.prev_action = np.zeros(3, dtype=np.float32)
+        obs, info = self.env.reset()
+
+        episode_num = 1
+        ep_peak_mass = float(info.get("player_mass", 20.0))
+        self.max_mass_achieved = ep_peak_mass
+        ep_steps = 0
+
         for step in range(steps):
-            # Respawn AI if dead
-            if not self.engine.get_player_cells(self.ai_player_id):
-                self.engine.spawn_player(self.ai_player_id, initial_mass=self.env_helper.initial_player_mass)
-                self.prev_action = np.zeros(3, dtype=np.float32)
+            # Query policy action
+            ai_action = self.policy_fn(obs)
 
-            # Query AI action
-            obs = self.env_helper._build_observation(player_id=self.ai_player_id)
-            raw_action = self.policy_fn(obs)
-            raw_action = np.clip(raw_action, -1.0, 1.0)
+            # Step the EXACT AgarEnv environment (smoothing, masking, bots, physics)
+            obs, reward, terminated, truncated, info = self.env.step(ai_action)
+            ep_steps += 1
 
-            # Action temporal smoothing (Guide Section 4.A: alpha = 0.70)
-            smooth_x = 0.70 * raw_action[0] + 0.30 * self.prev_action[0]
-            smooth_y = 0.70 * raw_action[1] + 0.30 * self.prev_action[1]
-            ai_action = np.array([smooth_x, smooth_y, raw_action[2]], dtype=np.float32)
-            self.prev_action = raw_action
-
-            # Action masking & validation (Guide Section 4.B)
-            pre_mass = self.engine.get_player_mass(self.ai_player_id)
-            trig = float(ai_action[2])
-
-            # Disable useless solo mass ejection
-            if 0.2 < trig <= 0.6:
-                ai_action[2] = -1.0
-
-            # Mask split action if mass < 36 or at max subcells capacity (16)
-            if trig > 0.5:
-                p_cells_now = self.engine.get_player_cells(self.ai_player_id)
-                if pre_mass < 36.0 or len(p_cells_now) >= 16:
-                    ai_action[2] = -1.0
-
-            # Prepare actions for all players
-            actions = {self.ai_player_id: ai_action}
-            for bot_id in range(1, self.num_bots + 1):
-                if not self.engine.get_player_cells(bot_id):
-                    self.engine.spawn_player(bot_id, initial_mass=self.env_helper.initial_player_mass)
-                actions[bot_id] = self.heuristic_bots[bot_id].get_action(self.engine)
-
-            # Advance engine
-            events = self.engine.step(actions)
-            ai_events = events.get(self.ai_player_id, {})
-
-            self.total_pellets_eaten += ai_events.get("pellets_eaten", 0)
-            self.total_cells_eaten += ai_events.get("cells_eaten", 0)
-            self.total_splits += ai_events.get("splits", 0)
-            current_mass = self.engine.get_player_mass(self.ai_player_id)
+            current_mass = float(info.get("player_mass", 0.0))
+            if current_mass > ep_peak_mass:
+                ep_peak_mass = current_mass
             if current_mass > self.max_mass_achieved:
                 self.max_mass_achieved = current_mass
+
+            self.total_pellets_eaten = int(info.get("episode_pellets", 0))
+            self.total_cells_eaten = int(info.get("episode_kills", 0))
+            self.total_splits += int(info.get("splits", 0))
 
             # Update camera
             self._update_camera()
 
-            # Render full visual frame with decision vector overlays
-            self._render_frame(step, ai_action, ai_events)
+            # Render visual frame
+            self._render_frame(step, ai_action, info, episode_num)
 
             # Extract frame buffer
             frame_data = pygame.surfarray.array3d(self.surface)
-            # Transpose from (W, H, C) to (H, W, C)
             frame_rgb = np.transpose(frame_data, (1, 0, 2))
             encoder.write_frame(frame_rgb)
 
             if (step + 1) % 100 == 0:
-                print(f"  [Progress] Step {step + 1}/{steps} | Mass: {int(current_mass)} | Pellets: {self.total_pellets_eaten} | Eaten: {self.total_cells_eaten}")
+                print(
+                    f"  [Progress] Step {step + 1}/{steps} | "
+                    f"Mass: {int(current_mass)} (Peak: {int(self.max_mass_achieved)}) | "
+                    f"Pellets: {self.total_pellets_eaten} | "
+                    f"Kills: {self.total_cells_eaten} | "
+                    f"Ep {episode_num}"
+                )
+
+            # Clean reset on episode termination (matches training VecMonitor behavior)
+            if terminated or truncated:
+                print(
+                    f"  [Episode {episode_num} Finished] "
+                    f"Peak Mass: {int(ep_peak_mass)} | "
+                    f"Final Mass: {int(current_mass)} | "
+                    f"Pellets: {self.total_pellets_eaten} | "
+                    f"Kills: {self.total_cells_eaten} | "
+                    f"Steps: {ep_steps}"
+                )
+                obs, info = self.env.reset()
+                episode_num += 1
+                ep_peak_mass = float(info.get("player_mass", 20.0))
+                ep_steps = 0
 
         encoder.close()
         pygame.quit()
@@ -318,6 +293,7 @@ class MatchRecorder:
         summary = {
             "output_path": self.output_path,
             "steps_recorded": steps,
+            "episodes_played": episode_num,
             "final_mass": float(self.engine.get_player_mass(self.ai_player_id)),
             "max_mass": float(self.max_mass_achieved),
             "pellets_eaten": int(self.total_pellets_eaten),
@@ -331,10 +307,11 @@ class MatchRecorder:
         print(f"  Pellets Eaten: {summary['pellets_eaten']}")
         print(f"  Cells Eaten: {summary['cells_eaten']}")
         print(f"  Splits Performed: {summary['splits_performed']}")
+        print(f"  Episodes: {summary['episodes_played']}")
         print("=" * 55)
         return summary
 
-    def _render_frame(self, step: int, ai_action: np.ndarray, ai_events: Dict[str, Any]) -> None:
+    def _render_frame(self, step: int, ai_action: np.ndarray, info: Dict[str, Any], episode: int) -> None:
         self.surface.fill((245, 246, 250))
 
         # 1. Background grid
@@ -400,7 +377,7 @@ class MatchRecorder:
 
         # 7. AI Model Decision Vector Overlay
         ai_cells = self.engine.get_player_cells(self.ai_player_id)
-        action_desc = "MOVING"
+        action_desc = "NAVIGATING"
         if ai_cells:
             cx, cy, _ = self.engine.get_player_centroid(self.ai_player_id)
             csx, csy = self._world_to_screen(cx, cy)
@@ -414,40 +391,34 @@ class MatchRecorder:
             tip_x = int(csx + dir_x * arrow_len)
             tip_y = int(csy + dir_y * arrow_len)
 
-            # Color by action trigger
-            if trig > 0.6:
+            if trig > 0.5:
                 arrow_color = (255, 40, 80)     # Red: Split
                 action_desc = "SPLIT ACTION!"
-                # Draw split blast indicator
                 pygame.draw.circle(self.surface, (255, 80, 120), (csx, csy), int(45 * self.cam_zoom), 3)
             elif 0.2 < trig <= 0.6:
                 arrow_color = (255, 200, 30)    # Yellow: Eject Mass
                 action_desc = "EJECTING MASS"
             else:
                 arrow_color = (0, 210, 255)     # Cyan: Navigating
-                action_desc = "HUNTING FOOD / FLEEING"
+                action_desc = "FORAGING / HUNTING"
 
-            # Draw decision vector arrow
             pygame.draw.line(self.surface, arrow_color, (csx, csy), (tip_x, tip_y), 5)
-            # Arrow head
             angle = math.atan2(dir_y, dir_x)
             p1 = (tip_x - 18 * math.cos(angle - 0.45), tip_y - 18 * math.sin(angle - 0.45))
             p2 = (tip_x - 18 * math.cos(angle + 0.45), tip_y - 18 * math.sin(angle + 0.45))
             pygame.draw.polygon(self.surface, arrow_color, [(tip_x, tip_y), p1, p2])
 
-        # 8. HUD Overlays
-        self._render_hud(step, action_desc)
+        # 8. HUD
+        self._render_hud(step, action_desc, info, episode)
 
-    def _render_hud(self, step: int, action_desc: str) -> None:
-        # Top HUD banner
+    def _render_hud(self, step: int, action_desc: str, info: Dict[str, Any], episode: int) -> None:
         top_surf = pygame.Surface((self.width, 42), pygame.SRCALPHA)
         top_surf.fill((15, 20, 32, 220))
         self.surface.blit(top_surf, (0, 0))
 
-        title = self.font.render(f"AGAR-RL HD MATCH REPLAY  |  Step: {step}", True, (255, 255, 255))
+        title = self.font.render(f"AGAR-RL HD MATCH REPLAY  |  Step: {step + 1}  |  Episode: {episode}", True, (255, 255, 255))
         self.surface.blit(title, (15, 11))
 
-        # Bottom HUD
         bot_surf = pygame.Surface((self.width, 50), pygame.SRCALPHA)
         bot_surf.fill((15, 20, 32, 220))
         self.surface.blit(bot_surf, (0, self.height - 50))
@@ -457,17 +428,17 @@ class MatchRecorder:
         subcells = len(ai_cells)
 
         stats_txt = (
-            f"AI Mass: {current_mass} (Max: {int(self.max_mass_achieved)})  |  "
+            f"AI Mass: {current_mass} (Peak: {int(self.max_mass_achieved)})  |  "
             f"Subcells: {subcells}  |  "
-            f"Pellets Eaten: {self.total_pellets_eaten}  |  "
-            f"Cells Eaten: {self.total_cells_eaten}  |  "
+            f"Pellets: {info.get('episode_pellets', 0)}  |  "
+            f"Kills: {info.get('episode_kills', 0)}  |  "
             f"Mode: {action_desc}"
         )
         mode_color = (255, 215, 0) if "SPLIT" in action_desc else (240, 240, 240)
         lbl = self.font_large.render(stats_txt, True, mode_color)
         self.surface.blit(lbl, (15, self.height - 42))
 
-        # Radar Minimap (bottom-right)
+        # Radar Minimap
         map_size = 130
         map_x = self.width - map_size - 10
         map_y = self.height - map_size - 60
@@ -488,11 +459,12 @@ def main():
     parser = argparse.ArgumentParser(description="Record an Agar.io AI match to HD MP4")
     parser.add_argument("--model", type=str, default="checkpoints/ppo/ppo_latest.zip", help="Path to SB3 .zip or ONNX model")
     parser.add_argument("--output", type=str, default="recordings/match_replay.mp4", help="Output MP4 path")
-    parser.add_argument("--steps", type=int, default=800, help="Number of steps to record (e.g. 800 @ 30 FPS = 26.6s)")
+    parser.add_argument("--steps", type=int, default=2400, help="Number of steps to record (e.g. 2400 @ 30 FPS = 80s)")
     parser.add_argument("--width", type=int, default=1280, help="Video width")
     parser.add_argument("--height", type=int, default=720, help="Video height")
     parser.add_argument("--fps", type=int, default=30, help="Video framerate")
     parser.add_argument("--bots", type=int, default=None, help="Number of bot opponents (default: from env_config.yaml)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
     args = parser.parse_args()
 
     recorder = MatchRecorder(
@@ -502,10 +474,10 @@ def main():
         screen_height=args.height,
         fps=args.fps,
         num_bots=args.bots,
+        seed=args.seed,
     )
     recorder.record(steps=args.steps)
 
 
 if __name__ == "__main__":
     main()
-
