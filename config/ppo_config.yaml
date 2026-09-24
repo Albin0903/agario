@@ -1,36 +1,36 @@
 # AGAR-RL PPO & Self-Play Configuration
-# Tuned for T4 GPU with smaller arena
+# High-Throughput L4 GPU Configuration (~2 to 3h training run)
 
 ppo:
   learning_rate: 0.0003
-  n_steps: 1024                 # Shorter rollouts = more frequent updates
-  batch_size: 256               # Larger batches = more stable gradients
-  n_epochs: 10
-  gamma: 0.995                  # Higher discount for longer episodes (2500 steps)
+  n_steps: 2048                 # Horizon per worker = 2048 (Guide Section 6)
+  batch_size: 512               # Stable mini-batch
+  n_epochs: 8                   # Epochs per rollout
+  gamma: 0.99                   # Discount factor for long-term survival
   gae_lambda: 0.95
   clip_range: 0.2
   clip_range_vf: null
   normalize_advantage: true
-  ent_coef: 0.01                # More exploration early on
+  ent_coef: 0.01                # Sustained exploration
   vf_coef: 0.5
   max_grad_norm: 0.5
-  total_timesteps: 10000000
+  total_timesteps: 15000000     # 15M timesteps (~2h15 on GPU L4 @ 1800 FPS)
 
 policy:
   net_arch:
-    pi: [256, 256]
-    vf: [256, 256]
+    pi: [512, 512]
+    vf: [512, 512]
   activation_fn: "ReLU"
 
 self_play:
-  update_interval_steps: 200000   # Save to pool every 200K steps
-  max_pool_size: 10
+  update_interval_steps: 250000   # Save to pool every 250K steps
+  max_pool_size: 20
   history_dir: "checkpoints/self_play_pool"
   save_dir: "checkpoints/ppo"
-  heuristic_opponent_ratio: 1.0   # 100% heuristic initially (no self-play overhead)
+  heuristic_opponent_ratio: 0.3   # 30% heuristic, 40% latest clone, 30% archives (Guide Section 2.A)
 
 training:
   n_envs: 16
-  eval_freq: 20000
+  eval_freq: 25000
   eval_episodes: 5
   seed: 42

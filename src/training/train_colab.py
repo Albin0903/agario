@@ -175,9 +175,10 @@ def main():
     ent_coef = float(ppo_cfg.get("ppo", {}).get("ent_coef", args.ent_coef))
     lr = float(ppo_cfg.get("ppo", {}).get("learning_rate", args.learning_rate))
 
-    # PPO Policy Architecture: 2x256 MLP
+    # PPO Policy Architecture: 2x512 MLP (Guide Section 6)
+    cfg_net_arch = ppo_cfg.get("policy", {}).get("net_arch", dict(pi=[512, 512], vf=[512, 512]))
     policy_kwargs = {
-        "net_arch": dict(pi=[256, 256], vf=[256, 256]),
+        "net_arch": cfg_net_arch,
         "activation_fn": torch.nn.ReLU,
     }
 
