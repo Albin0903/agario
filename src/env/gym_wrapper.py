@@ -153,10 +153,11 @@ class AgarEnv(gym.Env):
         self.pellet_reward = float(rewards_cfg.get("pellet_reward", 0.05))
         self.eat_cell_reward = float(rewards_cfg.get("eat_cell_reward", 5.0))
         self.death_penalty = float(rewards_cfg.get("death_penalty", -10.0))
-        self.inefficient_split_penalty = float(rewards_cfg.get("inefficient_split_penalty", 0.0))
-        self.split_eval_window = int(rewards_cfg.get("split_eval_window", 30))
+        self.inefficient_split_penalty = float(rewards_cfg.get("inefficient_split_penalty", 1.5))
+        self.split_eval_window = int(rewards_cfg.get("split_eval_window", 40))
         self.survival_reward = float(rewards_cfg.get("survival_reward", 0.001))
         self.proximity_pellet_reward = float(rewards_cfg.get("proximity_pellet_reward", 0.0))
+        self.prev_action = np.zeros(3, dtype=np.float32)
 
         self.initial_player_mass = float(cfg.get("physics", {}).get("initial_player_mass", 20.0))
         self.v_base = float(cfg.get("physics", {}).get("v_base", 2.0))
@@ -234,6 +235,7 @@ class AgarEnv(gym.Env):
             self.heuristic_bots[bot_id] = HeuristicBot(bot_id, rng=np.random.default_rng(seed))
 
         self.prev_mass = self.initial_player_mass
+        self.prev_action = np.zeros(3, dtype=np.float32)
         self.active_splits.clear()
         self.total_cells_eaten = 0
         self.episode_pellets_total = 0
@@ -252,7 +254,55 @@ class AgarEnv(gym.Env):
         self.current_step += 1
 
         # Clip action to action space
-        action = np.clip(action, self.action_space.low, self.action_space.high)
+        raw_action = np.clip(action, self.action_space.low, self.action_space.high)
+
+        # Temporal smoothing on target direction (75% new, 25% prev) to prevent 1-tick 180° flutter
+        smooth_x = 0.75 * raw_action[0] + 0.25 * self.prev_action[0]
+        smooth_y = 0.75 * raw_action[1] + 0.25 * self.prev_action[1]
+        action = np.array([smooth_x, smooth_y, raw_action[2]], dtype=np.float32)
+
+        # Direction jerk penalty (penalizes chaotic 180° back-and-forth oscillations)
+        jerk = float(np.hypot(raw_action[0] - self.prev_action[0], raw_action[1] - self.prev_action[1]))
+        r_jerk = -0.04 * max(0.0, jerk - 1.2)
+
+        # Pre-step state inspection for action validation
+        pre_mass = self.engine.get_player_mass(self.learning_player_id)
+        trig = float(action[2])
+        r_invalid = 0.0
+        r_tactical_split = 0.0
+
+        if trig > 0.6:
+            if pre_mass < 36.0:
+                # Attempting to split when smaller than official Agar.io min mass (36)
+                r_invalid -= 0.5
+            else:
+                # Check split direction for suicide split vs hunt split
+                cx_pre, cy_pre, _ = self.engine.get_player_centroid(self.learning_player_id)
+                m_norm = math.hypot(action[0], action[1])
+                s_dx = (action[0] / m_norm) if m_norm > 1e-5 else 1.0
+                s_dy = (action[1] / m_norm) if m_norm > 1e-5 else 0.0
+                split_half = pre_mass / 2.0
+
+                for other_cell in self.engine.cells:
+                    if other_cell.player_id == self.learning_player_id:
+                        continue
+                    odx = other_cell.x - cx_pre
+                    ody = other_cell.y - cy_pre
+                    odist = math.hypot(odx, ody)
+                    if 0 < odist < 350.0:
+                        dot = (odx * s_dx + ody * s_dy) / odist
+                        if dot > 0.5:  # Split aimed within ~60 degrees of opponent
+                            if other_cell.mass >= 1.15 * split_half:
+                                # Suicidal split directly into larger predator!
+                                r_tactical_split -= 5.0
+                                break
+                            elif split_half >= 1.15 * other_cell.mass and odist < 250.0:
+                                # Rewarding tactical split onto smaller prey
+                                r_tactical_split += 2.5
+                                break
+        elif 0.2 < trig <= 0.6 and pre_mass < 32.0:
+            # Attempting to eject mass when too small
+            r_invalid -= 0.3
 
         # Prepare actions dictionary for all active players
         actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: action}
@@ -325,23 +375,66 @@ class AgarEnv(gym.Env):
                 # Reward for closing distance (positive when getting closer)
                 delta = self.prev_nearest_pellet_dist - nearest_dist
                 r_proximity = float(np.clip(delta / 50.0, -0.5, 0.5)) * self.proximity_pellet_reward
-        # Predator threat proximity penalty (dense gradient to teach dodging/evading)
+
+        # Predator threat proximity penalty (strong dense gradient to teach evasion)
         r_danger = 0.0
         if not died and len(learning_cells) > 0:
-            cx, cy, _ = self.engine.get_player_centroid(self.learning_player_id)
+            cx, cy, cr = self.engine.get_player_centroid(self.learning_player_id)
+            move_norm = math.hypot(action[0], action[1])
+            mx = (action[0] / move_norm) if move_norm > 1e-5 else 0.0
+            my = (action[1] / move_norm) if move_norm > 1e-5 else 0.0
+
             for other_cell in self.engine.cells:
                 if other_cell.player_id != self.learning_player_id and other_cell.mass >= 1.15 * current_mass:
                     dist = math.hypot(other_cell.x - cx, other_cell.y - cy)
-                    safe_dist = other_cell.radius + 70.0
+                    safe_dist = other_cell.radius + cr + 140.0
                     if dist < safe_dist:
-                        r_danger -= float(0.04 * (1.0 - dist / safe_dist))
+                        danger_ratio = (safe_dist - dist) / safe_dist
+                        r_danger -= float(0.6 * (danger_ratio ** 2))
+
+                        # Extra penalty if moving directly towards this predator
+                        p_dx = (other_cell.x - cx) / max(1e-4, dist)
+                        p_dy = (other_cell.y - cy) / max(1e-4, dist)
+                        heading = mx * p_dx + my * p_dy
+                        if heading > 0:
+                            r_danger -= float(0.4 * heading * danger_ratio)
                         break
+
+        # Arena boundary wall danger & corner trap penalty
+        r_wall = 0.0
+        if not died and len(learning_cells) > 0:
+            cx, cy, _ = self.engine.get_player_centroid(self.learning_player_id)
+            d_wall = min(cx, cy, self.width - cx, self.height - cy)
+            if d_wall < 70.0:
+                wall_factor = (70.0 - d_wall) / 70.0
+                r_wall -= float(0.15 * wall_factor)
+                # Corner trap: predator nearby while against wall
+                has_predator_near = any(
+                    c.player_id != self.learning_player_id and c.mass >= 1.15 * current_mass and math.hypot(c.x - cx, c.y - cy) < 260.0
+                    for c in self.engine.cells
+                )
+                if has_predator_near:
+                    r_wall -= float(0.70 * wall_factor)
 
         self.episode_pellets_total += pellets_eaten
 
-        reward = float(r_mass * self.mass_scale + r_pellet + r_hunt + r_death - r_split_penalty + r_survival + r_proximity + r_danger)
+        reward = float(
+            r_mass * self.mass_scale
+            + r_pellet
+            + r_hunt
+            + r_death
+            - r_split_penalty
+            + r_survival
+            + r_proximity
+            + r_danger
+            + r_wall
+            + r_jerk
+            + r_invalid
+            + r_tactical_split
+        )
 
         self.prev_mass = current_mass
+        self.prev_action = raw_action
 
         terminated = bool(died)
         truncated = bool(self.current_step >= self.max_steps)

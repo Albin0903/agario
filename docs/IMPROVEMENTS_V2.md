@@ -70,3 +70,4 @@ Au lieu d'un pool FIFO simple, nous définissons **3 catégories d'adversaires**
 2. **Ajouter le bonus de palier de masse** (incitation à dépasser 130 de masse).
 3. **Instaurer la répartition 40% dernier clone / 40% archives figées / 20% heuristique**.
 4. **Augmenter la population de la carte (8 bots, 2000 pellets)**.
+

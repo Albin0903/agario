@@ -46,12 +46,12 @@ rewards:
   pellet_reward: 0.2            # Strong per-pellet bonus for early food-seeking
   eat_cell_reward: 15.0         # Big payoff for eating opponents
   death_penalty: -5.0           # Moderate: harsh enough to learn, but doesn't drown gradient
-  inefficient_split_penalty: 0.0
-  split_eval_window: 30
+  inefficient_split_penalty: 1.5 # Penalize random splits that do not yield cells
+  split_eval_window: 40
   survival_reward: 0.001        # Tiny baseline
   proximity_pellet_reward: 0.04 # Dense gradient: reward for approaching nearest food
 
 simulation:
-  max_steps: 2500               # ~40 seconds of gameplay at 60 FPS
-  num_bots: 5                   # Fewer bots = less death = more time to learn food-seeking
+  max_steps: 3500               # ~60 seconds of gameplay at 60 FPS (allows merging & virus tactics)
+  num_bots: 5                   # Balanced density for tactical interactions
   spatial_grid_cell_size: 80.0  # Smaller grid cells for smaller arena

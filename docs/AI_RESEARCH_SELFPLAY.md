@@ -81,3 +81,4 @@ Pour faire franchir un cap au modèle après le run de 5M :
 1. **Prioritized Fictitious Self-Play** : Sauvegarder jusqu'à 20 modèles dans le pool au lieu de 10, et échantillonner avec priorité aux checkpoints coriaces.
 2. **Durée de match augmentée (`max_steps: 4500`)** : Laisser aux cellules géantes le temps de fusionner et d'utiliser les virus.
 3. **Récompense de Virus Snipe** : Bonus majeur si une masse éjectée par le modèle déclenche un tir de virus sur un rival.
+

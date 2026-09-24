@@ -319,7 +319,7 @@ class AgarEngine:
         for cell in p_cells:
             if current_total >= self.max_subcells:
                 break
-            if cell.mass >= 20.0:  # Must have at least 20 mass to split into two >= 10 pieces
+            if cell.mass >= 36.0:  # Official Agar.io minimum mass to split (produces two cells >= 18)
                 half_mass = cell.mass / 2.0
                 cell.mass = half_mass
                 cooldown = self._compute_remerge_cooldown(half_mass)

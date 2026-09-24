@@ -78,14 +78,23 @@ class SelfPlayPool:
         return entry
 
     def sample_opponent(self) -> Optional[OpponentEntry]:
-        """Sample an opponent from the pool, or return None for heuristic bot."""
+        """Sample an opponent using Prioritized Fictitious Self-Play (PFSP):
+        - 20%: Heuristic baseline (guarantees grounding against hand-crafted bots)
+        - 40%: Latest checkpoint (freshest clone, forces active competitive adaptation)
+        - 40%: Historical pool (guards against strategy cycling and catastrophic forgetting)
+        """
         if not self.pool:
             return None
 
-        # Chance to select heuristic baseline
-        if random.random() < self.heuristic_ratio:
-            return None
+        roll = random.random()
+        if roll < self.heuristic_ratio:
+            return None  # 20% Heuristic bot
 
+        if roll < (self.heuristic_ratio + 0.40):
+            # 40% Latest checkpoint
+            return self.pool[-1]
+
+        # 40% Historical sample across earlier pool generations
         return random.choice(self.pool)
 
     def get_action(self, opponent: Optional[OpponentEntry], obs: np.ndarray) -> np.ndarray:
@@ -107,21 +116,29 @@ class SelfPlayPool:
             return np.clip(action, -1.0, 1.0)
 
     def sync_from_disk(self) -> int:
-        """Scan history_dir on disk and load any newly saved checkpoints."""
+        """Scan history_dir on disk and load newly saved checkpoints in numerical order."""
         if not os.path.exists(self.history_dir):
             return 0
         loaded = 0
         existing_paths = set(entry.path for entry in self.pool)
-        for f in sorted(os.listdir(self.history_dir)):
-            if f.endswith(".zip"):
-                full_path = os.path.join(self.history_dir, f)
-                if full_path not in existing_paths:
-                    try:
-                        self.add_checkpoint(full_path, tag=f.replace(".zip", ""))
-                        existing_paths.add(full_path)
-                        loaded += 1
-                    except Exception:
-                        pass
+
+        import re
+        def step_key(filename: str) -> int:
+            m = re.search(r'step_(\d+)', filename)
+            return int(m.group(1)) if m else 0
+
+        files = [f for f in os.listdir(self.history_dir) if f.endswith(".zip")]
+        files.sort(key=step_key)
+
+        for f in files:
+            full_path = os.path.join(self.history_dir, f)
+            if full_path not in existing_paths:
+                try:
+                    self.add_checkpoint(full_path, tag=f.replace(".zip", ""))
+                    existing_paths.add(full_path)
+                    loaded += 1
+                except Exception:
+                    pass
         return loaded
 
 
