@@ -25,7 +25,7 @@ physics:
   mass_decay_rate: 0.00003
 
 entities:
-  num_pellets: 1200             # 1200 in 1.44M sq units = 3.6x denser than before
+  num_pellets: 1500             # Denser pellets = faster mass accumulation
   pellet_mass: 1.0
   num_viruses: 6                # Fewer viruses in smaller arena
   virus_mass: 100.0

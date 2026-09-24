@@ -236,6 +236,7 @@ class AgarEnv(gym.Env):
         self.prev_mass = self.initial_player_mass
         self.active_splits.clear()
         self.total_cells_eaten = 0
+        self.episode_pellets_total = 0
         self.prev_nearest_pellet_dist = 0.0  # Will be computed on first step
 
         obs = self._build_observation()
@@ -324,9 +325,21 @@ class AgarEnv(gym.Env):
                 # Reward for closing distance (positive when getting closer)
                 delta = self.prev_nearest_pellet_dist - nearest_dist
                 r_proximity = float(np.clip(delta / 50.0, -0.5, 0.5)) * self.proximity_pellet_reward
-            self.prev_nearest_pellet_dist = nearest_dist
+        # Predator threat proximity penalty (dense gradient to teach dodging/evading)
+        r_danger = 0.0
+        if not died and len(learning_cells) > 0:
+            cx, cy, _ = self.engine.get_player_centroid(self.learning_player_id)
+            for other_cell in self.engine.cells:
+                if other_cell.player_id != self.learning_player_id and other_cell.mass >= 1.15 * current_mass:
+                    dist = math.hypot(other_cell.x - cx, other_cell.y - cy)
+                    safe_dist = other_cell.radius + 70.0
+                    if dist < safe_dist:
+                        r_danger -= float(0.04 * (1.0 - dist / safe_dist))
+                        break
 
-        reward = float(r_mass * self.mass_scale + r_pellet + r_hunt + r_death - r_split_penalty + r_survival + r_proximity)
+        self.episode_pellets_total += pellets_eaten
+
+        reward = float(r_mass * self.mass_scale + r_pellet + r_hunt + r_death - r_split_penalty + r_survival + r_proximity + r_danger)
 
         self.prev_mass = current_mass
 
@@ -337,7 +350,9 @@ class AgarEnv(gym.Env):
         info = {
             "player_mass": current_mass,
             "cells_eaten": cells_eaten,
-            "pellets_eaten": player_events.get("pellets_eaten", 0),
+            "pellets_eaten": pellets_eaten,
+            "episode_pellets": self.episode_pellets_total,
+            "episode_kills": self.total_cells_eaten,
             "died": died,
             "splits": splits_performed,
             "step": self.current_step,

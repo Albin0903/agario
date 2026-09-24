@@ -52,8 +52,6 @@ class SelfPlayCallback(BaseCallback):
                 mass = info.get("player_mass", None)
                 if mass is not None:
                     self.rolling_masses.append(float(mass))
-                self.rolling_cells_eaten.append(info.get("cells_eaten", 0))
-                self.rolling_pellets_eaten.append(info.get("pellets_eaten", 0))
                 self.rolling_splits.append(info.get("splits", 0))
 
             if i < len(dones) and dones[i]:
@@ -61,8 +59,13 @@ class SelfPlayCallback(BaseCallback):
                 episode_info = info.get("episode", None) if isinstance(info, dict) else None
                 if episode_info is not None:
                     self.rolling_rewards.append(float(episode_info["r"]))
+                    self.rolling_lengths.append(int(episode_info["l"]))
                 elif i < len(rewards):
                     self.rolling_rewards.append(float(rewards[i]))
+
+                if isinstance(info, dict):
+                    self.rolling_pellets_eaten.append(info.get("episode_pellets", 0))
+                    self.rolling_cells_eaten.append(info.get("episode_kills", 0))
 
         # Log rolling statistics
         if (self.num_timesteps - self.last_log_step) >= self.log_interval_steps:
@@ -84,9 +87,9 @@ class SelfPlayCallback(BaseCallback):
                 print(
                     f"[Step {self.num_timesteps:8d}] "
                     f"Mass: {avg_mass:5.1f} | "
-                    f"Ep Reward: {avg_rew:7.2f} | "
-                    f"Pellets: {avg_pellets:4.1f} | "
-                    f"Kills: {avg_eaten:4.2f} | "
+                    f"Ep Rew: {avg_rew:7.2f} | "
+                    f"Pellets/Ep: {avg_pellets:4.0f} | "
+                    f"Kills/Ep: {avg_eaten:4.2f} | "
                     f"Pool: {len(self.pool)}"
                 )
 
