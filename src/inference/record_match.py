@@ -125,14 +125,13 @@ class MatchRecorder:
         screen_width: int = 1280,
         screen_height: int = 720,
         fps: int = 30,
-        num_bots: int = 10,
+        num_bots: Optional[int] = None,
     ):
         pygame.init()
         self.width = screen_width
         self.height = screen_height
         self.fps = fps
         self.output_path = output_path
-        self.num_bots = num_bots
 
         self.surface = pygame.Surface((self.width, self.height))
         self.font = pygame.font.SysFont("Arial", 16, bold=True)
@@ -151,6 +150,7 @@ class MatchRecorder:
         pellets = int(env_cfg.get("entities", {}).get("num_pellets", 1500))
         viruses = int(env_cfg.get("entities", {}).get("num_viruses", 6))
         actual_bots = num_bots if num_bots is not None else int(env_cfg.get("simulation", {}).get("num_bots", 5))
+        self.num_bots = actual_bots
 
         # Authentic engine setup
         self.engine = AgarEngine(
@@ -165,19 +165,21 @@ class MatchRecorder:
             mass_decay_rate=float(env_cfg.get("physics", {}).get("mass_decay_rate", 0.00003)),
         )
 
+        self.env_helper = AgarEnv(config=env_cfg)
+        self.env_helper.engine = self.engine
+
         self.ai_player_id = 0
-        self.engine.spawn_player(self.ai_player_id, initial_mass=20.0)
+        self.engine.spawn_player(self.ai_player_id, initial_mass=self.env_helper.initial_player_mass)
 
         self.heuristic_bots = {
             i: HeuristicBot(i) for i in range(1, actual_bots + 1)
         }
         for i in range(1, actual_bots + 1):
-            self.engine.spawn_player(i, initial_mass=20.0)
+            self.engine.spawn_player(i, initial_mass=self.env_helper.initial_player_mass)
 
         # Policy loading
         self.policy_fn = self._load_policy(model_path)
-        self.env_helper = AgarEnv(config=env_cfg)
-        self.env_helper.engine = self.engine
+        self.prev_action = np.zeros(3, dtype=np.float32)
 
         # Camera
         self.cam_x = arena_w / 2.0
@@ -245,20 +247,43 @@ class MatchRecorder:
         encoder = VideoEncoder(self.output_path, self.width, self.height, self.fps)
 
         print(f"[MatchRecorder] Recording match for {steps} steps at {self.fps} FPS...")
+        self.prev_action = np.zeros(3, dtype=np.float32)
         for step in range(steps):
             # Respawn AI if dead
             if not self.engine.get_player_cells(self.ai_player_id):
-                self.engine.spawn_player(self.ai_player_id, initial_mass=25.0)
+                self.engine.spawn_player(self.ai_player_id, initial_mass=self.env_helper.initial_player_mass)
+                self.prev_action = np.zeros(3, dtype=np.float32)
 
             # Query AI action
             obs = self.env_helper._build_observation(player_id=self.ai_player_id)
-            ai_action = self.policy_fn(obs)
+            raw_action = self.policy_fn(obs)
+            raw_action = np.clip(raw_action, -1.0, 1.0)
+
+            # Action temporal smoothing (Guide Section 4.A: alpha = 0.70)
+            smooth_x = 0.70 * raw_action[0] + 0.30 * self.prev_action[0]
+            smooth_y = 0.70 * raw_action[1] + 0.30 * self.prev_action[1]
+            ai_action = np.array([smooth_x, smooth_y, raw_action[2]], dtype=np.float32)
+            self.prev_action = raw_action
+
+            # Action masking & validation (Guide Section 4.B)
+            pre_mass = self.engine.get_player_mass(self.ai_player_id)
+            trig = float(ai_action[2])
+
+            # Disable useless solo mass ejection
+            if 0.2 < trig <= 0.6:
+                ai_action[2] = -1.0
+
+            # Mask split action if mass < 36 or at max subcells capacity (16)
+            if trig > 0.5:
+                p_cells_now = self.engine.get_player_cells(self.ai_player_id)
+                if pre_mass < 36.0 or len(p_cells_now) >= 16:
+                    ai_action[2] = -1.0
 
             # Prepare actions for all players
             actions = {self.ai_player_id: ai_action}
             for bot_id in range(1, self.num_bots + 1):
                 if not self.engine.get_player_cells(bot_id):
-                    self.engine.spawn_player(bot_id, initial_mass=25.0)
+                    self.engine.spawn_player(bot_id, initial_mass=self.env_helper.initial_player_mass)
                 actions[bot_id] = self.heuristic_bots[bot_id].get_action(self.engine)
 
             # Advance engine
@@ -467,7 +492,7 @@ def main():
     parser.add_argument("--width", type=int, default=1280, help="Video width")
     parser.add_argument("--height", type=int, default=720, help="Video height")
     parser.add_argument("--fps", type=int, default=30, help="Video framerate")
-    parser.add_argument("--bots", type=int, default=10, help="Number of bot opponents")
+    parser.add_argument("--bots", type=int, default=None, help="Number of bot opponents (default: from env_config.yaml)")
     args = parser.parse_args()
 
     recorder = MatchRecorder(
