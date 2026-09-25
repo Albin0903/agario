@@ -6,7 +6,13 @@ import time
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from src.env.entities import mass_to_radius, mass_to_speed, Pellet, Virus, Cell, EjectedMass
-from src.env.physics_fast import check_pellet_collisions_numba, spawn_pellet_coords_fast
+from src.env.physics_fast import (
+    check_pellet_collisions_numba,
+    check_pellet_collisions_fast,
+    find_virus_cell_collisions_numba,
+    find_cell_eat_events_numba,
+    spawn_pellet_coords_fast,
+)
 
 
 class SpatialHashGrid:
@@ -20,7 +26,7 @@ class SpatialHashGrid:
         self.cols = int(math.ceil(width / cell_size))
         self.rows = int(math.ceil(height / cell_size))
         self.total_cells = self.cols * self.rows
-        self.buckets: List[List[int]] = [[] for _ in range(self.total_cells)]
+        self.buckets: List[set] = [set() for _ in range(self.total_cells)]
         self.pellet_buckets: np.ndarray = np.zeros(0, dtype=np.int32)
 
     def clear(self) -> None:
@@ -39,7 +45,7 @@ class SpatialHashGrid:
         indices = rows * self.cols + cols
         self.pellet_buckets[:] = indices
         for i, idx in enumerate(indices):
-            self.buckets[idx].append(i)
+            self.buckets[idx].add(i)
 
     def update_pellet(self, idx: int, new_x: float, new_y: float) -> None:
         """Incrementally update single pellet position bucket."""
@@ -52,12 +58,8 @@ class SpatialHashGrid:
         new_bucket = r * self.cols + c
         old_bucket = int(self.pellet_buckets[idx])
         if new_bucket != old_bucket:
-            b = self.buckets[old_bucket]
-            try:
-                b.remove(idx)
-            except ValueError:
-                pass
-            self.buckets[new_bucket].append(idx)
+            self.buckets[old_bucket].discard(idx)
+            self.buckets[new_bucket].add(idx)
             self.pellet_buckets[idx] = new_bucket
 
     def query_circle(self, x: float, y: float, radius: float) -> List[int]:
@@ -862,11 +864,9 @@ class AgarEngine:
             return
 
         self._refresh_player_cache()
-        pellet_eaten_by, cell_counts = check_pellet_collisions_numba(
+        eaten_pellet_indices, cell_counts = check_pellet_collisions_fast(
             self.pellets_xy, self.cells_xy, self.cells_r
         )
-
-        eaten_pellet_indices = np.where(pellet_eaten_by >= 0)[0]
         if len(eaten_pellet_indices) == 0:
             return
 
@@ -1013,7 +1013,7 @@ class AgarEngine:
         self.ejected = surviving_ejected
 
     def _resolve_virus_collisions(self) -> None:
-        """Resolve collisions between cells and static viruses.
+        """Resolve collisions between cells and static viruses using Numba JIT.
 
         Official Agar.io Rules:
         1. If cell.mass <= virus_split_threshold:
@@ -1025,117 +1025,102 @@ class AgarEngine:
              Cell EXPLODES into fragments up to max_subcells!
            In both cases, the virus is consumed and respawns elsewhere.
         """
-        if not self.cells:
+        if not self.cells or self.num_viruses == 0:
             return
 
-        for v_idx in range(self.num_viruses):
-            vx, vy = self.viruses_xy[v_idx]
+        self._refresh_player_cache()
+        v_hit, c_hit = find_virus_cell_collisions_numba(
+            self.viruses_xy, self.cells_xy, self.cells_r, self.cells_mass, self.virus_split_threshold
+        )
+        if len(v_hit) == 0:
+            return
 
-            for cell in list(self.cells):
-                dx = cell.x - vx
-                dy = cell.y - vy
-                dist_sq = dx * dx + dy * dy
+        for v_idx, c_idx in zip(v_hit, c_hit):
+            if c_idx >= len(self.cells):
+                continue
+            cell = self.cells[c_idx]
+            p_cells = self.get_player_cells(cell.player_id)
+            if len(p_cells) >= self.max_subcells:
+                # 16-CELL ABSORPTION: player at maximum subcell cap absorbs the virus!
+                cell.mass += self.virus_mass
+                self.step_events[cell.player_id]["virus_eaten"] = True
+            else:
+                # CELL EXPLODES into fragments
+                self.step_events[cell.player_id]["virus_exploded"] = True
+                self._explode_cell_on_virus(cell)
 
-                # Collision: virus center inside cell radius
-                if dist_sq < (cell.radius * cell.radius):
-                    if cell.mass > self.virus_split_threshold:
-                        p_cells = self.get_player_cells(cell.player_id)
-                        if len(p_cells) >= self.max_subcells:
-                            # 16-CELL ABSORPTION: player at maximum subcell cap absorbs the virus!
-                            cell.mass += self.virus_mass
-                            self.step_events[cell.player_id]["virus_eaten"] = True
-                        else:
-                            # CELL EXPLODES into fragments
-                            self.step_events[cell.player_id]["virus_exploded"] = True
-                            self._explode_cell_on_virus(cell)
-
-                        # Virus is consumed, respawns in a new location
-                        self.viruses_xy[v_idx, 0] = float(self.rng.uniform(100.0, self.width - 100.0))
-                        self.viruses_xy[v_idx, 1] = float(self.rng.uniform(100.0, self.height - 100.0))
-                        self._cells_cache_valid = False
-                        break  # Move to next virus
+            # Virus is consumed, respawns in a new location
+            self.viruses_xy[v_idx, 0] = float(self.rng.uniform(100.0, self.width - 100.0))
+            self.viruses_xy[v_idx, 1] = float(self.rng.uniform(100.0, self.height - 100.0))
+            self._cells_cache_valid = False
 
     def _resolve_cell_interplay(self) -> None:
         """Resolve consumption between different players (Predator vs Prey).
 
         Rule: Cell A absorbs Cell B if dist(A, B) < r_A and m_A >= 1.1 * m_B.
         Mass conservation: m_A <- m_A + m_B.
-        Zero nested distance loops: fully vectorized NumPy pairwise distance matrix.
+        Zero nested distance loops: JIT-compiled C search with AABB pre-filtering.
         """
         n = len(self.cells)
         if n < 2:
             return
 
-        xy = np.array([[c.x, c.y] for c in self.cells], dtype=np.float32)
-        masses = np.array([c.mass for c in self.cells], dtype=np.float32)
-        radii = np.array([c.radius for c in self.cells], dtype=np.float32)
-        pids = np.array([c.player_id for c in self.cells], dtype=np.int32)
-
-        # Pairwise displacement: shape (n, n, 2)
-        diff = xy[:, np.newaxis, :] - xy[np.newaxis, :, :]
-        dx = diff[:, :, 0]
-        dy = diff[:, :, 1]
-        dist_sq = dx * dx + dy * dy
-
-        # Condition 1: different players
-        diff_player = pids[:, np.newaxis] != pids[np.newaxis, :]
-        # Condition 2: m_A >= 1.1 * m_B
-        can_eat_mass = masses[:, np.newaxis] >= (self.eat_ratio * masses[np.newaxis, :])
-        # Condition 3: dist(A, B) < r_A
-        within_reach = dist_sq < (radii[:, np.newaxis] * radii[:, np.newaxis])
-
-        # Composite eat matrix: eat_matrix[i, j] is True if cell i eats cell j
-        eat_matrix = diff_player & can_eat_mass & within_reach
+        self._refresh_player_cache()
+        eaters, preys = find_cell_eat_events_numba(
+            self.cells_xy, self.cells_mass, self.cells_r, self.cells_pid, self.eat_ratio
+        )
+        if len(eaters) == 0:
+            return
 
         eaten_indices = set()
-        # Sort potential eaters by mass descending for deterministic resolution
-        eater_candidates = np.where(np.any(eat_matrix, axis=1))[0]
-        eater_candidates = sorted(eater_candidates, key=lambda idx: masses[idx], reverse=True)
+        # Sort distinct eaters by mass descending for deterministic resolution
+        unique_eaters = sorted(set(eaters), key=lambda idx: self.cells_mass[idx], reverse=True)
 
-        for i in eater_candidates:
-            if i in eaten_indices:
+        for i in unique_eaters:
+            if i in eaten_indices or i >= len(self.cells):
                 continue
-            preys = np.where(eat_matrix[i])[0]
-            for j in preys:
-                if j in eaten_indices:
-                    continue
-                # Cell i eats cell j
-                eaten_indices.add(j)
-                eaten_mass = float(self.cells[j].mass)
-                self.cells[i].mass += eaten_mass
-                self.step_events[self.cells[i].player_id]["cells_eaten"] += 1
-                self.step_events[self.cells[i].player_id]["mass_eaten"] += eaten_mass
-                self.step_events[self.cells[j].player_id]["subcells_lost"] += 1
-                if self.cells[i].mass > self.max_cell_mass:
-                    p_cells = self.get_player_cells(self.cells[i].player_id)
-                    if len(p_cells) < self.max_subcells:
-                        half_m = self.cells[i].mass / 2.0
-                        self.cells[i].mass = half_m
-                        cd = self._compute_remerge_cooldown(half_m)
-                        self.cells[i].remerge_cooldown = cd
-                        spd = math.hypot(self.cells[i].vx, self.cells[i].vy)
-                        sdx = self.cells[i].vx / spd if spd > 1e-4 else 1.0
-                        sdy = self.cells[i].vy / spd if spd > 1e-4 else 0.0
-                        r = self.cells[i].radius
-                        nx = float(np.clip(self.cells[i].x + sdx * (r + 10.0), r, self.width - r))
-                        ny = float(np.clip(self.cells[i].y + sdy * (r + 10.0), r, self.height - r))
-                        new_c = Cell(
-                            id=self._next_cell_id,
-                            player_id=self.cells[i].player_id,
-                            x=nx,
-                            y=ny,
-                            mass=half_m,
-                            vx=self.cells[i].vx,
-                            vy=self.cells[i].vy,
-                            boost_vx=float(sdx * self.split_boost_speed),
-                            boost_vy=float(sdy * self.split_boost_speed),
-                            remerge_cooldown=cd,
-                        )
-                        self._next_cell_id += 1
-                        self.cells.append(new_c)
-                        self.step_events[self.cells[i].player_id]["splits"] += 1
-                    else:
-                        self.cells[i].mass = self.max_cell_mass
+            for k in range(len(eaters)):
+                if eaters[k] == i:
+                    j = preys[k]
+                    if j in eaten_indices or j >= len(self.cells):
+                        continue
+                    # Cell i eats cell j
+                    eaten_indices.add(j)
+                    eaten_mass = float(self.cells[j].mass)
+                    self.cells[i].mass += eaten_mass
+                    self.step_events[self.cells[i].player_id]["cells_eaten"] += 1
+                    self.step_events[self.cells[i].player_id]["mass_eaten"] += eaten_mass
+                    self.step_events[self.cells[j].player_id]["subcells_lost"] += 1
+                    if self.cells[i].mass > self.max_cell_mass:
+                        p_cells = self.get_player_cells(self.cells[i].player_id)
+                        if len(p_cells) < self.max_subcells:
+                            half_m = self.cells[i].mass / 2.0
+                            self.cells[i].mass = half_m
+                            cd = self._compute_remerge_cooldown(half_m)
+                            self.cells[i].remerge_cooldown = cd
+                            spd = math.hypot(self.cells[i].vx, self.cells[i].vy)
+                            sdx = self.cells[i].vx / spd if spd > 1e-4 else 1.0
+                            sdy = self.cells[i].vy / spd if spd > 1e-4 else 0.0
+                            r = self.cells[i].radius
+                            nx = float(np.clip(self.cells[i].x + sdx * (r + 10.0), r, self.width - r))
+                            ny = float(np.clip(self.cells[i].y + sdy * (r + 10.0), r, self.height - r))
+                            new_c = Cell(
+                                id=self._next_cell_id,
+                                player_id=self.cells[i].player_id,
+                                x=nx,
+                                y=ny,
+                                mass=half_m,
+                                vx=self.cells[i].vx,
+                                vy=self.cells[i].vy,
+                                boost_vx=float(sdx * self.split_boost_speed),
+                                boost_vy=float(sdy * self.split_boost_speed),
+                                remerge_cooldown=cd,
+                            )
+                            self._next_cell_id += 1
+                            self.cells.append(new_c)
+                            self.step_events[self.cells[i].player_id]["splits"] += 1
+                        else:
+                            self.cells[i].mass = self.max_cell_mass
 
         if eaten_indices:
             self.cells = [c for idx, c in enumerate(self.cells) if idx not in eaten_indices]
