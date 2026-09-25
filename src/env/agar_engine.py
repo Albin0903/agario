@@ -328,7 +328,7 @@ class AgarEngine:
         return cell
 
     def _refresh_player_cache(self) -> None:
-        """Refresh dictionary lookups for active player cells and centroids."""
+        """Refresh dictionary lookups for active player cells and centroids (single-pass)."""
         if self._cells_cache_valid:
             return
         self._player_cells_cache.clear()
@@ -343,29 +343,51 @@ class AgarEngine:
             self._cells_pid_buf = np.empty(self._cells_buf_cap, dtype=np.int32)
             self._cells_r_buf = np.empty(self._cells_buf_cap, dtype=np.float32)
 
+        p_cells = self._player_cells_cache
+        p_mass = self._player_mass_cache
+        p_cent = self._player_centroid_cache
+        xy_buf = self._cells_xy_buf
+        m_buf = self._cells_mass_buf
+        pid_buf = self._cells_pid_buf
+        r_buf = self._cells_r_buf
+
+        accum: Dict[int, List[float]] = {}
+
         for i, c in enumerate(self.cells):
-            self._player_cells_cache.setdefault(c.player_id, []).append(c)
-            self._cells_xy_buf[i, 0] = c.x
-            self._cells_xy_buf[i, 1] = c.y
-            self._cells_mass_buf[i] = c.mass
-            self._cells_pid_buf[i] = c.player_id
-            self._cells_r_buf[i] = c.radius
+            pid = c.player_id
+            cx, cy, cm, cr = c.x, c.y, c.mass, c.radius
+            xy_buf[i, 0] = cx
+            xy_buf[i, 1] = cy
+            m_buf[i] = cm
+            pid_buf[i] = pid
+            r_buf[i] = cr
+            p_cells.setdefault(pid, []).append(c)
 
-        self.cells_xy = self._cells_xy_buf[:n]
-        self.cells_mass = self._cells_mass_buf[:n]
-        self.cells_pid = self._cells_pid_buf[:n]
-        self.cells_r = self._cells_r_buf[:n]
-
-        for pid, p_cells in self._player_cells_cache.items():
-            tot_mass = sum(c.mass for c in p_cells)
-            self._player_mass_cache[pid] = tot_mass
-            if tot_mass > 0:
-                cx = sum(c.x * c.mass for c in p_cells) / tot_mass
-                cy = sum(c.y * c.mass for c in p_cells) / tot_mass
-                eff_radius = mass_to_radius(tot_mass, scale=self.radius_scale)
+            if pid not in accum:
+                accum[pid] = [cm, cx * cm, cy * cm, cx, cy, cr]
             else:
-                cx, cy, eff_radius = p_cells[0].x, p_cells[0].y, p_cells[0].radius
-            self._player_centroid_cache[pid] = (float(cx), float(cy), float(eff_radius))
+                acc = accum[pid]
+                acc[0] += cm
+                acc[1] += cx * cm
+                acc[2] += cy * cm
+
+        self.cells_xy = xy_buf[:n]
+        self.cells_mass = m_buf[:n]
+        self.cells_pid = pid_buf[:n]
+        self.cells_r = r_buf[:n]
+
+        scale = self.radius_scale
+        for pid, acc in accum.items():
+            tm = acc[0]
+            p_mass[pid] = tm
+            if tm > 0.0:
+                cx = acc[1] / tm
+                cy = acc[2] / tm
+                eff_radius = scale * math.sqrt(tm)
+            else:
+                cx, cy, eff_radius = acc[3], acc[4], acc[5]
+            p_cent[pid] = (float(cx), float(cy), float(eff_radius))
+
         self._cells_cache_valid = True
 
     def get_player_cells(self, player_id: int) -> List[Cell]:

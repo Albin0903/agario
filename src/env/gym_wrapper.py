@@ -23,6 +23,7 @@ from src.env.physics_fast import (
     find_single_nearest_pellet_numba,
     find_single_nearest_pellet_candidates_numba,
     compute_heuristic_threat_prey,
+    extract_entities_observation_numba,
 )
 
 
@@ -423,90 +424,30 @@ class AgarEnv(gym.Env):
         obs[4:24] = pellet_feats
         self._last_pellet_dist = nearest_dist
 
-        # Separate preys and predators based on authentic Agar.io subcell-level capabilities
-        preys: List[Tuple[float, float, float, float, float, float]] = []
-        predators: List[Tuple[float, float, float, float, float]] = []
+        # 3. Preys, Predators, Viruses, Walls, Global (24 to 84) via compiled Numba JIT
+        self.engine._refresh_player_cache()
+        n_all = len(self.engine.cells)
+        cells_vx = np.empty(n_all, dtype=np.float32)
+        cells_vy = np.empty(n_all, dtype=np.float32)
+        for i, c in enumerate(self.engine.cells):
+            cells_vx[i] = c.vx
+            cells_vy[i] = c.vy
 
-        for other_cell in self.engine.cells:
-            if other_cell.player_id == pid:
-                continue
-            dx = other_cell.x - cx
-            dy = other_cell.y - cy
-            dist = math.hypot(dx, dy)
-            if dist > view_r:
-                continue
+        can_explode = (max_subcell_mass > self.engine.virus_split_threshold) and (len(my_cells) < self.engine.max_subcells)
+        min_cd = min((c.remerge_cooldown for c in my_cells), default=0)
 
-            v_rel = math.hypot(other_cell.vx - avg_vx, other_cell.vy - avg_vy)
+        p_dist, p_dx, p_dy, p_mass = extract_entities_observation_numba(
+            obs, cx, cy, avg_vx, avg_vy, view_r, self.v_max,
+            max_subcell_mass, min_subcell_mass, pid,
+            self.engine.cells_xy, self.engine.cells_mass, self.engine.cells_pid,
+            cells_vx, cells_vy, self.engine.viruses_xy, can_explode,
+            self.engine.width, self.engine.height, cr, float(min_cd),
+        )
 
-            # Authentic Prey condition: our largest cell can eat it! (other_cell.mass * 1.1 <= max_subcell_mass)
-            # If our largest cell can eat it, it is prey (our main cell can split-kill or chase it down)
-            if other_cell.mass * 1.1 <= max_subcell_mass:
-                log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, max_subcell_mass))
-                log_ratio_norm = float(np.tanh(log_ratio))
-                preys.append((dist, dx, dy, log_ratio_norm, v_rel, other_cell.mass))
-            elif other_cell.mass >= 1.1 * min_subcell_mass:
-                # Authentic Predator condition: our largest cell CANNOT eat it, AND it threatens at least one subcell!
-                log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, max_subcell_mass))
-                log_ratio_norm = float(np.tanh(log_ratio))
-                predators.append((dist, dx, dy, log_ratio_norm, v_rel))
-
-        # 3. 5 Prey Cells (20 floats) -> offset 24 to 44
-        preys.sort(key=lambda item: item[0])
         if pid == self.learning_player_id:
-            if preys:
-                self._last_prey_dist = preys[0][0]
-                self._last_prey_dx = preys[0][1]
-                self._last_prey_dy = preys[0][2]
-                self._last_prey_mass = preys[0][5]
-            else:
-                self._last_prey_dist = -1.0
-                self._last_prey_dx = 0.0
-                self._last_prey_dy = 0.0
-                self._last_prey_mass = 0.0
+            self._last_prey_dist = p_dist
+            self._last_prey_dx = p_dx
+            self._last_prey_dy = p_dy
+            self._last_prey_mass = p_mass
 
-        for i, (dist, dx, dy, lr_norm, v_rel, *_) in enumerate(preys[:5]):
-            base = 24 + i * 4
-            obs[base] = float(np.clip(dx / view_r, -1.0, 1.0))
-            obs[base + 1] = float(np.clip(dy / view_r, -1.0, 1.0))
-            obs[base + 2] = lr_norm
-            obs[base + 3] = float(np.clip(v_rel / self.v_max, -1.0, 1.0))
-
-        # 4. 5 Predator Cells (20 floats) -> offset 44 to 64
-        predators.sort(key=lambda item: item[0])
-        for i, (_, dx, dy, lr_norm, v_rel) in enumerate(predators[:5]):
-            base = 44 + i * 4
-            obs[base] = float(np.clip(dx / view_r, -1.0, 1.0))
-            obs[base + 1] = float(np.clip(dy / view_r, -1.0, 1.0))
-            obs[base + 2] = lr_norm
-            obs[base + 3] = float(np.clip(v_rel / self.v_max, -1.0, 1.0))
-
-        # 5. 4 nearest Viruses (12 floats) -> offset 64 to 76
-        v_dx = self.engine.viruses_xy[:, 0] - cx
-        v_dy = self.engine.viruses_xy[:, 1] - cy
-        v_dists = np.hypot(v_dx, v_dy)
-        v_sorted = np.argsort(v_dists)[:4]
-
-        can_explode_on_virus = (max_subcell_mass > self.engine.virus_split_threshold) and (len(my_cells) < self.engine.max_subcells)
-        threat_sign = -1.0 if can_explode_on_virus else 1.0
-
-        for i, v_idx in enumerate(v_sorted):
-            base = 64 + i * 3
-            if v_dists[v_idx] <= view_r:
-                obs[base] = float(np.clip(v_dx[v_idx] / view_r, -1.0, 1.0))
-                obs[base + 1] = float(np.clip(v_dy[v_idx] / view_r, -1.0, 1.0))
-                obs[base + 2] = threat_sign
-
-        # 6. Distances to 4 arena walls (4 floats) -> offset 76 to 80
-        obs[76] = float(np.clip((self.height - cy) / view_r, 0.0, 1.0))
-        obs[77] = float(np.clip(cy / view_r, 0.0, 1.0))
-        obs[78] = float(np.clip(cx / view_r, 0.0, 1.0))
-        obs[79] = float(np.clip((self.width - cx) / view_r, 0.0, 1.0))
-
-        # 7. Global position & properties (4 floats) -> offset 80 to 84
-        min_remerge = min((c.remerge_cooldown for c in my_cells), default=0)
-        obs[80] = float(np.clip((cx / self.width) * 2.0 - 1.0, -1.0, 1.0))
-        obs[81] = float(np.clip((cy / self.height) * 2.0 - 1.0, -1.0, 1.0))
-        obs[82] = float(np.clip(cr / view_r, 0.0, 1.0))
-        obs[83] = float(np.clip(min_remerge / 300.0, 0.0, 1.0))
-
-        return np.clip(obs, -1.0, 1.0)
+        return obs

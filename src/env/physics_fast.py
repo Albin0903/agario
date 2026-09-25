@@ -459,3 +459,192 @@ def spawn_pellet_coords_fast(
                 break
     return xs, ys
 
+
+@nb.njit(fastmath=True)
+def extract_entities_observation_numba(
+    obs: np.ndarray,
+    cx: float,
+    cy: float,
+    avg_vx: float,
+    avg_vy: float,
+    view_r: float,
+    v_max: float,
+    max_subcell_mass: float,
+    min_subcell_mass: float,
+    pid: int,
+    cells_xy: np.ndarray,
+    cells_mass: np.ndarray,
+    cells_pid: np.ndarray,
+    cells_vx: np.ndarray,
+    cells_vy: np.ndarray,
+    viruses_xy: np.ndarray,
+    can_explode_on_virus: bool,
+    width: float,
+    height: float,
+    cr: float,
+    min_remerge: float,
+):
+    """JIT-compiled extraction of Prey, Predator, Virus, Wall, and Global observation vectors.
+
+    Fills obs[24:84] in pure compiled C with zero heap allocations.
+    """
+    inv_view = 1.0 / max(1.0, view_r)
+    inv_vmax = 1.0 / max(1.0, v_max)
+
+    # 1. Prey & Predator top-5 tracking
+    best_prey_dist = np.full(5, 1e9, dtype=np.float32)
+    best_prey_dx = np.zeros(5, dtype=np.float32)
+    best_prey_dy = np.zeros(5, dtype=np.float32)
+    best_prey_lr = np.zeros(5, dtype=np.float32)
+    best_prey_vrel = np.zeros(5, dtype=np.float32)
+    best_prey_mass = np.zeros(5, dtype=np.float32)
+
+    best_pred_dist = np.full(5, 1e9, dtype=np.float32)
+    best_pred_dx = np.zeros(5, dtype=np.float32)
+    best_pred_dy = np.zeros(5, dtype=np.float32)
+    best_pred_lr = np.zeros(5, dtype=np.float32)
+    best_pred_vrel = np.zeros(5, dtype=np.float32)
+
+    closest_prey_dist = -1.0
+    closest_prey_dx = 0.0
+    closest_prey_dy = 0.0
+    closest_prey_mass = 0.0
+
+    n_cells = len(cells_xy)
+    for c in range(n_cells):
+        if cells_pid[c] == pid:
+            continue
+        dx = cells_xy[c, 0] - cx
+        if abs(dx) > view_r:
+            continue
+        dy = cells_xy[c, 1] - cy
+        if abs(dy) > view_r:
+            continue
+        dist = math.hypot(dx, dy)
+        if dist > view_r:
+            continue
+
+        c_mass = cells_mass[c]
+        v_rel = math.hypot(cells_vx[c] - avg_vx, cells_vy[c] - avg_vy)
+
+        if c_mass * 1.1 <= max_subcell_mass:
+            # Prey
+            lr = math.log(max(1.0, c_mass) / max(1.0, max_subcell_mass))
+            lr_norm = math.tanh(lr)
+            if dist < best_prey_dist[4]:
+                idx = 4
+                while idx > 0 and dist < best_prey_dist[idx - 1]:
+                    best_prey_dist[idx] = best_prey_dist[idx - 1]
+                    best_prey_dx[idx] = best_prey_dx[idx - 1]
+                    best_prey_dy[idx] = best_prey_dy[idx - 1]
+                    best_prey_lr[idx] = best_prey_lr[idx - 1]
+                    best_prey_vrel[idx] = best_prey_vrel[idx - 1]
+                    best_prey_mass[idx] = best_prey_mass[idx - 1]
+                    idx -= 1
+                best_prey_dist[idx] = dist
+                best_prey_dx[idx] = dx
+                best_prey_dy[idx] = dy
+                best_prey_lr[idx] = lr_norm
+                best_prey_vrel[idx] = v_rel
+                best_prey_mass[idx] = c_mass
+
+        elif c_mass >= 1.1 * min_subcell_mass:
+            # Predator
+            lr = math.log(max(1.0, c_mass) / max(1.0, max_subcell_mass))
+            lr_norm = math.tanh(lr)
+            if dist < best_pred_dist[4]:
+                idx = 4
+                while idx > 0 and dist < best_pred_dist[idx - 1]:
+                    best_pred_dist[idx] = best_pred_dist[idx - 1]
+                    best_pred_dx[idx] = best_pred_dx[idx - 1]
+                    best_pred_dy[idx] = best_pred_dy[idx - 1]
+                    best_pred_lr[idx] = best_pred_lr[idx - 1]
+                    best_pred_vrel[idx] = best_pred_vrel[idx - 1]
+                    idx -= 1
+                best_pred_dist[idx] = dist
+                best_pred_dx[idx] = dx
+                best_pred_dy[idx] = dy
+                best_pred_lr[idx] = lr_norm
+                best_pred_vrel[idx] = v_rel
+
+    if best_prey_dist[0] < 1e8:
+        closest_prey_dist = best_prey_dist[0]
+        closest_prey_dx = best_prey_dx[0]
+        closest_prey_dy = best_prey_dy[0]
+        closest_prey_mass = best_prey_mass[0]
+
+    # Write Preys (24 to 44)
+    for i in range(5):
+        base = 24 + i * 4
+        if best_prey_dist[i] < 1e8:
+            obs[base] = max(-1.0, min(1.0, best_prey_dx[i] * inv_view))
+            obs[base + 1] = max(-1.0, min(1.0, best_prey_dy[i] * inv_view))
+            obs[base + 2] = best_prey_lr[i]
+            obs[base + 3] = max(-1.0, min(1.0, best_prey_vrel[i] * inv_vmax))
+        else:
+            obs[base] = 0.0
+            obs[base + 1] = 0.0
+            obs[base + 2] = 0.0
+            obs[base + 3] = 0.0
+
+    # Write Predators (44 to 64)
+    for i in range(5):
+        base = 44 + i * 4
+        if best_pred_dist[i] < 1e8:
+            obs[base] = max(-1.0, min(1.0, best_pred_dx[i] * inv_view))
+            obs[base + 1] = max(-1.0, min(1.0, best_pred_dy[i] * inv_view))
+            obs[base + 2] = best_pred_lr[i]
+            obs[base + 3] = max(-1.0, min(1.0, best_pred_vrel[i] * inv_vmax))
+        else:
+            obs[base] = 0.0
+            obs[base + 1] = 0.0
+            obs[base + 2] = 0.0
+            obs[base + 3] = 0.0
+
+    # 2. Viruses (64 to 76)
+    n_v = len(viruses_xy)
+    best_v_dist = np.full(4, 1e9, dtype=np.float32)
+    best_v_dx = np.zeros(4, dtype=np.float32)
+    best_v_dy = np.zeros(4, dtype=np.float32)
+    threat_sign = -1.0 if can_explode_on_virus else 1.0
+
+    for v in range(n_v):
+        v_dx = viruses_xy[v, 0] - cx
+        v_dy = viruses_xy[v, 1] - cy
+        dist = math.hypot(v_dx, v_dy)
+        if dist < best_v_dist[3]:
+            idx = 3
+            while idx > 0 and dist < best_v_dist[idx - 1]:
+                best_v_dist[idx] = best_v_dist[idx - 1]
+                best_v_dx[idx] = best_v_dx[idx - 1]
+                best_v_dy[idx] = best_v_dy[idx - 1]
+                idx -= 1
+            best_v_dist[idx] = dist
+            best_v_dx[idx] = v_dx
+            best_v_dy[idx] = v_dy
+
+    for i in range(4):
+        base = 64 + i * 3
+        if best_v_dist[i] <= view_r:
+            obs[base] = max(-1.0, min(1.0, best_v_dx[i] * inv_view))
+            obs[base + 1] = max(-1.0, min(1.0, best_v_dy[i] * inv_view))
+            obs[base + 2] = threat_sign
+        else:
+            obs[base] = 0.0
+            obs[base + 1] = 0.0
+            obs[base + 2] = 0.0
+
+    # 3. Walls (76 to 80)
+    obs[76] = max(0.0, min(1.0, (height - cy) * inv_view))
+    obs[77] = max(0.0, min(1.0, cy * inv_view))
+    obs[78] = max(0.0, min(1.0, cx * inv_view))
+    obs[79] = max(0.0, min(1.0, (width - cx) * inv_view))
+
+    # 4. Global pos & properties (80 to 84)
+    obs[80] = max(-1.0, min(1.0, (cx / width) * 2.0 - 1.0))
+    obs[81] = max(-1.0, min(1.0, (cy / height) * 2.0 - 1.0))
+    obs[82] = max(0.0, min(1.0, cr * inv_view))
+    obs[83] = max(0.0, min(1.0, min_remerge / 300.0))
+
+    return closest_prey_dist, closest_prey_dx, closest_prey_dy, closest_prey_mass
+
