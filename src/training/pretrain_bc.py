@@ -149,8 +149,10 @@ def pretrain_policy(
             b_trigs = b_trigs.to(dev)
 
             dist = policy.get_distribution(b_obs)
-            logits_angle = dist.distribution[0].logits
-            logits_trig = dist.distribution[1].logits
+            # sb3-contrib exposes one categorical distribution per MultiDiscrete
+            # branch through `distributions` (plural).
+            logits_angle = dist.distributions[0].logits
+            logits_trig = dist.distributions[1].logits
 
             loss_angle = F.cross_entropy(logits_angle, b_angles)
             loss_trig = F.cross_entropy(logits_trig, b_trigs)

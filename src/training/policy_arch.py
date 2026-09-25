@@ -193,14 +193,14 @@ def build_policy_kwargs(ppo_cfg: Dict[str, Any]) -> Dict[str, Any]:
 def load_trained_model(path: str, allow_legacy: bool = True, **kwargs):
     """Load MaskablePPO, optionally allowing legacy vanilla PPO checkpoints."""
     last_error: Optional[Exception] = None
-    if not allow_legacy:
-        raise RuntimeError(f"'{path}' is not a V10 MaskablePPO checkpoint") from last_error
     try:
         from sb3_contrib import MaskablePPO
 
         return MaskablePPO.load(path, **kwargs)
     except Exception as exc:
         last_error = exc
+    if not allow_legacy:
+        raise RuntimeError(f"'{path}' is not a V10 MaskablePPO checkpoint") from last_error
     try:
         from stable_baselines3 import PPO
 
