@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import math
+import time
 from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from src.env.entities import mass_to_radius, mass_to_speed, Pellet, Virus, Cell, EjectedMass
@@ -172,6 +173,8 @@ class AgarEngine:
 
         # Event tracking per step
         self.step_events: Dict[int, Dict[str, Any]] = {}
+        self.profile_enabled = False
+        self.last_profile: Dict[str, float] = {}
 
         self.reset(seed)
 
@@ -274,6 +277,11 @@ class AgarEngine:
         self._next_ejected_id = 1
         self.step_events.clear()
         self._cells_cache_valid = False
+
+    def set_profiling(self, enabled: bool = True) -> None:
+        """Enable optional per-phase timing for short diagnostics only."""
+        self.profile_enabled = bool(enabled)
+        self.last_profile = {}
 
     def spawn_player(self, player_id: int, initial_mass: float = 20.0, xy: Optional[Tuple[float, float]] = None) -> Cell:
         """Spawn an initial single cell for a player safely outside existing player cells."""
@@ -547,6 +555,11 @@ class AgarEngine:
         Returns:
             Dictionary of event metrics per player (cells_eaten, pellets_eaten, deaths, splits).
         """
+        profiling = self.profile_enabled
+        phase_started = time.perf_counter() if profiling else 0.0
+        if profiling:
+            self.last_profile = {}
+
         # Initialize step stats
         unique_players = set(c.player_id for c in self.cells).union(actions.keys())
         self.step_events = {
@@ -578,6 +591,10 @@ class AgarEngine:
                 target_vec = np.array([float(act[0]), float(act[1])], dtype=np.float32)
                 ejects = self._execute_eject(pid, target_vec)
                 self.step_events[pid]["ejects"] += ejects
+
+        if profiling:
+            self.last_profile["actions"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
 
         # Resolve target world coordinates per player
         player_targets: Dict[int, Tuple[float, float]] = {}
@@ -626,6 +643,10 @@ class AgarEngine:
                 scale_factor = 1.0 + max(0.0, cell.mass - 100.0) / 800.0
                 decay = cell.mass * self.mass_decay_rate * scale_factor
                 cell.mass = max(100.0, cell.mass - decay)
+
+        if profiling:
+            self.last_profile["movement"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
 
         # Centroid attraction:
         # 1. Idle grouping: when target is near centroid (e.g. mouse placed on centroid or idle action).
@@ -678,6 +699,10 @@ class AgarEngine:
 
         self._cells_cache_valid = False
 
+        if profiling:
+            self.last_profile["integration"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
+
         # 3. Update ejected mass movements (with authentic wall bounce)
         if self.ejected:
             surviving_ejected: List[EjectedMass] = []
@@ -712,17 +737,36 @@ class AgarEngine:
         # 4. Intra-player cell overlap & remerge
         self._resolve_intra_player_remerge()
 
+        if profiling:
+            self.last_profile["remerge"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
+
         # 5. Cell vs Pellet collisions (Vectorized with Spatial Hashing)
         self._resolve_pellet_collisions()
+
+        if profiling:
+            self.last_profile["pellets"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
 
         # 6. Cell vs Ejected mass collisions
         self._resolve_ejected_collisions()
 
+        if profiling:
+            self.last_profile["ejected"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
+
         # 7. Cell vs Virus collisions
         self._resolve_virus_collisions()
 
+        if profiling:
+            self.last_profile["viruses"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
+
         # 8. Cell vs Cell collisions (Predator / Prey)
         self._resolve_cell_interplay()
+
+        if profiling:
+            self.last_profile["cell_interplay"] = time.perf_counter() - phase_started
 
         return self.step_events
 

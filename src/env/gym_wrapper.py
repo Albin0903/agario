@@ -19,7 +19,9 @@ from src.env.agar_engine import AgarEngine
 from src.env.entities import mass_to_radius
 from src.env.physics_fast import (
     find_nearest_pellets_numba,
+    find_nearest_pellets_candidates_numba,
     find_single_nearest_pellet_numba,
+    find_single_nearest_pellet_candidates_numba,
     compute_heuristic_threat_prey,
 )
 
@@ -95,7 +97,13 @@ class HeuristicBot:
             return np.array([prey_dx, prey_dy, -1.0], dtype=np.float32)
 
         # 5. Forage nearest pellet
-        found, p_dx, p_dy = find_single_nearest_pellet_numba(cx, cy, engine.pellets_xy, max_dist=min(view_r, 350.0))
+        pellet_candidates = np.asarray(
+            engine.spatial_grid.query_circle(cx, cy, min(view_r, 350.0)),
+            dtype=np.int32,
+        )
+        found, p_dx, p_dy = find_single_nearest_pellet_candidates_numba(
+            cx, cy, engine.pellets_xy, pellet_candidates, max_dist=min(view_r, 350.0)
+        )
         if found:
             return np.array([p_dx, p_dy, -1.0], dtype=np.float32)
 
@@ -405,7 +413,13 @@ class AgarEnv(gym.Env):
         obs[3] = float(np.clip(len(my_cells) / 16.0, 0.0, 1.0))
 
         # 2. 10 nearest Pellets (20 floats) -> offset 4 to 24 (compiled Numba JIT)
-        pellet_feats, nearest_dist = find_nearest_pellets_numba(cx, cy, self.engine.pellets_xy, view_r, k=10)
+        pellet_candidates = np.asarray(
+            self.engine.spatial_grid.query_circle(cx, cy, view_r),
+            dtype=np.int32,
+        )
+        pellet_feats, nearest_dist = find_nearest_pellets_candidates_numba(
+            cx, cy, self.engine.pellets_xy, pellet_candidates, view_r, k=10
+        )
         obs[4:24] = pellet_feats
         self._last_pellet_dist = nearest_dist
 

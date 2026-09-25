@@ -108,6 +108,53 @@ def find_nearest_pellets_numba(
 
 
 @nb.njit(fastmath=True)
+def find_nearest_pellets_candidates_numba(
+    cx: float,
+    cy: float,
+    pellets_xy: np.ndarray,
+    candidate_indices: np.ndarray,
+    view_r: float,
+    k: int = 10,
+):
+    """Find nearest pellets from spatial-grid candidates instead of all pellets."""
+    view_r_sq = view_r * view_r
+    best_dists_sq = np.full(k, 1e12, dtype=np.float32)
+    best_dx = np.zeros(k, dtype=np.float32)
+    best_dy = np.zeros(k, dtype=np.float32)
+
+    for candidate in candidate_indices:
+        p = int(candidate)
+        dx = pellets_xy[p, 0] - cx
+        dy = pellets_xy[p, 1] - cy
+        d_sq = dx * dx + dy * dy
+        if d_sq <= view_r_sq and d_sq < best_dists_sq[k - 1]:
+            idx = k - 1
+            while idx > 0 and d_sq < best_dists_sq[idx - 1]:
+                best_dists_sq[idx] = best_dists_sq[idx - 1]
+                best_dx[idx] = best_dx[idx - 1]
+                best_dy[idx] = best_dy[idx - 1]
+                idx -= 1
+            best_dists_sq[idx] = d_sq
+            best_dx[idx] = dx
+            best_dy[idx] = dy
+
+    res = np.zeros(k * 2, dtype=np.float32)
+    nearest_dist = -1.0
+    if best_dists_sq[0] < 1e10:
+        d0 = math.sqrt(max(1e-8, best_dists_sq[0]))
+        nearest_dist = d0
+        res[0] = best_dx[0] / d0
+        res[1] = best_dy[0] / d0
+
+    for i in range(1, k):
+        if best_dists_sq[i] < 1e10:
+            res[i * 2] = max(-1.0, min(1.0, best_dx[i] / view_r))
+            res[i * 2 + 1] = max(-1.0, min(1.0, best_dy[i] / view_r))
+
+    return res, float(nearest_dist)
+
+
+@nb.njit(fastmath=True)
 def compute_heuristic_threat_prey(
     cx: float,
     cy: float,
@@ -182,6 +229,38 @@ def find_single_nearest_pellet_numba(
                     best_dx = dx
                     best_dy = dy
                     found = True
+
+    if found:
+        dist = math.sqrt(max(1e-8, best_dist_sq))
+        return True, float(best_dx / dist), float(best_dy / dist)
+    return False, 0.0, 0.0
+
+
+@nb.njit(fastmath=True)
+def find_single_nearest_pellet_candidates_numba(
+    cx: float,
+    cy: float,
+    pellets_xy: np.ndarray,
+    candidate_indices: np.ndarray,
+    max_dist: float = 350.0,
+):
+    """Find one nearest pellet from spatial-grid candidates."""
+    max_d_sq = max_dist * max_dist
+    best_dist_sq = max_d_sq
+    best_dx = 0.0
+    best_dy = 0.0
+    found = False
+
+    for candidate in candidate_indices:
+        p = int(candidate)
+        dx = pellets_xy[p, 0] - cx
+        dy = pellets_xy[p, 1] - cy
+        d_sq = dx * dx + dy * dy
+        if d_sq < best_dist_sq:
+            best_dist_sq = d_sq
+            best_dx = dx
+            best_dy = dy
+            found = True
 
     if found:
         dist = math.sqrt(max(1e-8, best_dist_sq))
