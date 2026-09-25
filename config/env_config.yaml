@@ -48,13 +48,15 @@ action:
   num_angles: 24                # 360 / 24 = 15 degrees resolution
 
 rewards:
-  mass_scale: 1.0               # Delta mass scaling (AgarCL standard)
-  kill_reward: 25.0             # Combat payoff for eliminating opponent (SOTA GoBigger/AgarCL)
+  mass_scale: 1.0               # Delta mass scaling (AgarCL standard: Delta M / M_0)
+  kill_reward_multiplier: 1.5   # Proportional combat payoff based on consumed victim mass
+  kill_reward: 0.0              # Removed arbitrary +25 scalar (eliminated suicide-for-tiny-kills bias)
   death_penalty_max: 10.0       # Terminal penalty on being eaten
-  forage_reward_scale: 0.04     # Dense PBRS gradient towards closest pellet (damped for large cells)
-  hunt_reward_scale: 0.15       # Directional pursuit alignment reward (heading cosine toward prey)
-  split_strike_bonus: 0.5       # Natural bonus when splitting towards prey in forward cone
-  split_waste_penalty: 0.0      # Zero artificial toll penalty (prevents policy paralysis)
+  forage_reward_scale: 0.02     # Light PBRS gradient towards closest pellet (damped for large cells)
+  hunt_reward_scale: 0.05       # Subtle directional pursuit alignment
+  split_strike_bonus: 0.0       # Purified in V9: zero artificial split bonus (eliminates panic split bias)
+  split_waste_penalty: 0.0      # Zero artificial toll penalty
+  split_invalid_penalty: 0.05   # Physical feedback when attempting split with insufficient mass or at 16 cells
 
 simulation:
   max_steps: 3500               # Match length in ticks

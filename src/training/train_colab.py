@@ -35,7 +35,7 @@ import numpy as np
 import torch
 
 from stable_baselines3 import PPO
-from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecMonitor
+from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecMonitor, VecNormalize
 from stable_baselines3.common.utils import set_random_seed
 
 from src.env.gym_wrapper import AgarEnv
@@ -271,11 +271,22 @@ def main():
 
     vec_env = VecMonitor(vec_env)
 
-    # Setup PPO hyperparameters
-    n_steps = int(ppo_cfg.get("ppo", {}).get("n_steps", args.n_steps))
-    batch_size = int(ppo_cfg.get("ppo", {}).get("batch_size", args.batch_size))
-    n_epochs = int(ppo_cfg.get("ppo", {}).get("n_epochs", 8))
     gamma = float(ppo_cfg.get("ppo", {}).get("gamma", args.gamma))
+
+    # SOTA 2026 Stability: VecNormalize running reward variance stabilizer
+    # Normalizes return variance so late-game multi-kill combat doesn't destabilize early representations
+    vn_path = os.path.join(args.save_dir, "vec_normalize.pkl")
+    if args.backup_dir and os.path.exists(os.path.join(args.backup_dir, "vec_normalize.pkl")):
+        import shutil
+        os.makedirs(args.save_dir, exist_ok=True)
+        shutil.copy2(os.path.join(args.backup_dir, "vec_normalize.pkl"), vn_path)
+
+    if os.path.exists(vn_path):
+        print(f"📊 [VecNormalize] Restoring running normalization stats from {vn_path}")
+        vec_env = VecNormalize.load(vn_path, vec_env)
+    else:
+        print("📊 [VecNormalize] Initializing running reward normalization (norm_obs=False, norm_reward=True, clip=10.0)")
+        vec_env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, clip_reward=10.0, gamma=gamma)
     gae_lambda = float(ppo_cfg.get("ppo", {}).get("gae_lambda", args.gae_lambda))
     ent_coef = float(ppo_cfg.get("ppo", {}).get("ent_coef", args.ent_coef))
     lr = float(ppo_cfg.get("ppo", {}).get("learning_rate", args.learning_rate))
@@ -393,6 +404,8 @@ def main():
     # Save final model
     final_path = os.path.join(args.save_dir, "ppo_final.zip")
     model.save(final_path)
+    if isinstance(vec_env, VecNormalize):
+        vec_env.save(os.path.join(args.save_dir, "vec_normalize.pkl"))
     print(f"\nTraining complete! Final model saved to: {final_path}")
 
     if args.backup_dir:
@@ -400,6 +413,8 @@ def main():
             import shutil
             os.makedirs(args.backup_dir, exist_ok=True)
             shutil.copy2(final_path, os.path.join(args.backup_dir, "ppo_final.zip"))
+            if isinstance(vec_env, VecNormalize):
+                shutil.copy2(os.path.join(args.save_dir, "vec_normalize.pkl"), os.path.join(args.backup_dir, "vec_normalize.pkl"))
             print(f"📁 [Drive Backup] Final model mirrored to: {os.path.join(args.backup_dir, 'ppo_final.zip')}")
         except Exception as e:
             print(f"⚠️ [Drive Backup] Warning: Could not mirror final model: {e}")

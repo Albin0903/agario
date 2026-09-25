@@ -145,20 +145,24 @@ class AgarEnv(gym.Env):
                 dtype=np.float32,
             )
 
-        # SOTA Minimalist Reward formulation (AgarCL / AgarIA standard)
+        # SOTA Minimalist Reward formulation (AgarCL / AgarIA / GoBigger standard)
         rewards_cfg = cfg.get("rewards", {})
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
-        self.eat_cell_reward = float(rewards_cfg.get("kill_reward", rewards_cfg.get("eat_cell_reward", 25.0)))
+        self.kill_reward_multiplier = float(rewards_cfg.get("kill_reward_multiplier", 1.5))
+        self.eat_cell_reward = float(rewards_cfg.get("kill_reward", 0.0))
         self.death_penalty_max = float(rewards_cfg.get("death_penalty_max", 10.0))
-        self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.04))
-        self.hunt_reward_scale = float(rewards_cfg.get("hunt_reward_scale", 0.08))
-        self.split_strike_bonus = float(rewards_cfg.get("split_strike_bonus", 0.5))
-        self.split_waste_penalty = float(rewards_cfg.get("split_waste_penalty", 0.25))
+        self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.02))
+        self.hunt_reward_scale = float(rewards_cfg.get("hunt_reward_scale", 0.05))
+        self.split_strike_bonus = float(rewards_cfg.get("split_strike_bonus", 0.0))
+        self.split_waste_penalty = float(rewards_cfg.get("split_waste_penalty", 0.0))
+        self.split_invalid_penalty = float(rewards_cfg.get("split_invalid_penalty", 0.05))
 
         self.action_repeat = int(sim_cfg.get("action_repeat", 3))
         self.initial_player_mass = float(cfg.get("physics", {}).get("initial_player_mass", 20.0))
         self.v_base = float(cfg.get("physics", {}).get("v_base", 3.5))
         self.v_max = 2.0
+        self.min_split_mass = float(cfg.get("physics", {}).get("min_split_mass", 36.0))
+        self.max_subcells = int(cfg.get("physics", {}).get("max_subcells", 16))
 
         self.engine = AgarEngine(
             width=self.width,
@@ -269,6 +273,7 @@ class AgarEnv(gym.Env):
 
         total_cells_eaten = 0
         total_pellets_eaten = 0
+        total_mass_eaten = 0.0
         total_splits = 0
         died = False
 
@@ -302,6 +307,7 @@ class AgarEnv(gym.Env):
             player_events = events.get(self.learning_player_id, {})
             total_cells_eaten += player_events.get("cells_eaten", 0)
             total_pellets_eaten += player_events.get("pellets_eaten", 0)
+            total_mass_eaten += player_events.get("mass_eaten", 0.0)
             total_splits += player_events.get("splits", 0)
 
             learning_cells = self.engine.get_player_cells(self.learning_player_id)
@@ -313,23 +319,28 @@ class AgarEnv(gym.Env):
         self.total_cells_eaten += total_cells_eaten
         self.episode_pellets_total += total_pellets_eaten
 
-        # SOTA Minimalist Reward (AgarCL / AgarIA standard):
+        # SOTA Minimalist Reward (AgarCL / AgarIA / GoBigger standard):
         # 1. Normalized mass gain (strictly positive on eating pellets or cells)
         delta_mass = current_mass - self.prev_mass
         r_growth = (delta_mass / self.initial_player_mass) * self.mass_scale
 
-        # 2. Direct combat payoff for eating an opponent
-        r_kill = self.eat_cell_reward * float(total_cells_eaten)
+        # 2. Combat payoff strictly proportional to victim mass (GoBigger standard)
+        # Prevents valuing a 10-mass bot equally to a 200-mass bot!
+        r_kill = (total_mass_eaten / self.initial_player_mass) * self.kill_reward_multiplier
+        if self.eat_cell_reward > 0.0:
+            r_kill += self.eat_cell_reward * float(total_cells_eaten)
 
         # 3. Moderate death penalty (AgarIA standard, never paralyzing)
         r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
 
-        # Natural Split Strike Bonus: positive reward when splitting towards edible prey in strike zone
-        # Only awarded if split piece (pre_max_subcell_mass / 2) can actually consume the prey! (Agar.io eat_ratio = 1.1)
-        # Zero artificial penalty: exploration is never taxed or paralyzed!
+        # 4. Action Invalidity Feedback for Split (Physical Feedback)
+        # If the agent attempts a split when it's physically impossible (mass < 36 or at 16 cells),
+        # apply light friction penalty to discourage wasted commands.
         r_split = 0.0
-        if engine_action[2] > 0.6 or total_splits > 0:
-            if 40.0 < pre_prey_dist < 320.0 and pre_prey_mass > 0:
+        if engine_action[2] > 0.6:
+            if total_splits == 0 and (pre_max_subcell_mass < self.min_split_mass or len(pre_learning_cells) >= self.max_subcells):
+                r_split = -self.split_invalid_penalty
+            elif self.split_strike_bonus > 0.0 and 40.0 < pre_prey_dist < 320.0 and pre_prey_mass > 0:
                 if (pre_max_subcell_mass / 2.0) > 1.15 * pre_prey_mass:
                     act_angle = math.atan2(float(engine_action[1]), float(engine_action[0]))
                     prey_angle = math.atan2(pre_prey_dy, pre_prey_dx)

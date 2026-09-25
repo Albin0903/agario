@@ -553,6 +553,7 @@ class AgarEngine:
             pid: {
                 "pellets_eaten": 0,
                 "cells_eaten": 0,
+                "mass_eaten": 0.0,
                 "subcells_lost": 0,
                 "ejected_mass_eaten": 0,
                 "died": False,
@@ -1056,8 +1057,10 @@ class AgarEngine:
                     continue
                 # Cell i eats cell j
                 eaten_indices.add(j)
-                self.cells[i].mass += self.cells[j].mass
+                eaten_mass = float(self.cells[j].mass)
+                self.cells[i].mass += eaten_mass
                 self.step_events[self.cells[i].player_id]["cells_eaten"] += 1
+                self.step_events[self.cells[i].player_id]["mass_eaten"] += eaten_mass
                 self.step_events[self.cells[j].player_id]["subcells_lost"] += 1
                 if self.cells[i].mass > self.max_cell_mass:
                     p_cells = self.get_player_cells(self.cells[i].player_id)

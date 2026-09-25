@@ -113,12 +113,20 @@ class SelfPlayCallback(BaseCallback):
             latest_path = os.path.join(self.save_dir, "ppo_latest.zip")
             self.model.save(latest_path)
 
+            # Save VecNormalize stats if active
+            vec_norm = getattr(self.model, "get_vec_normalize_env", lambda: None)()
+            vn_path = os.path.join(self.save_dir, "vec_normalize.pkl")
+            if vec_norm is not None:
+                vec_norm.save(vn_path)
+
             if self.backup_dir:
                 try:
                     import shutil
                     os.makedirs(self.backup_dir, exist_ok=True)
                     shutil.copy2(checkpoint_path, os.path.join(self.backup_dir, checkpoint_filename))
                     shutil.copy2(latest_path, os.path.join(self.backup_dir, "ppo_latest.zip"))
+                    if vec_norm is not None and os.path.exists(vn_path):
+                        shutil.copy2(vn_path, os.path.join(self.backup_dir, "vec_normalize.pkl"))
                     if self.verbose > 0:
                         print(f"📁 [Drive Backup] Checkpoint mirrored to {self.backup_dir}")
                 except Exception as e:
