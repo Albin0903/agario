@@ -187,59 +187,63 @@ def main():
                 except Exception:
                     pass
         resume_path = None
-    elif args.backup_dir:
-        os.makedirs(args.backup_dir, exist_ok=True)
-        drive_zips = [
-            z for z in glob.glob(os.path.join(args.backup_dir, "*.zip"))
-            if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._") and "bc_pretrained" not in os.path.basename(z)
-        ]
+    else:
+        # Check if explicit resume checkpoint was provided
+        resume_path = None
+        if args.resume and args.resume.lower() not in ("none", "false", "no"):
+            if os.path.exists(args.resume):
+                resume_path = args.resume
+                print(f"🎯 [Explicit Resume] Resuming directly from specified checkpoint: {resume_path}")
+            elif args.backup_dir and os.path.exists(os.path.join(args.backup_dir, os.path.basename(args.resume))):
+                resume_path = os.path.join(args.backup_dir, os.path.basename(args.resume))
+                print(f"🎯 [Explicit Resume] Found checkpoint in backup dir: {resume_path}")
 
-        if not drive_zips:
-            # Backup directory is clean -> Starting a new run or version (e.g. v5)
-            # Purge stale local checkpoints on Colab VM disk to avoid accidental resume
-            print(f"📁 [Drive Backup] '{args.backup_dir}' is clean (0 checkpoints).")
-            print("   🧹 Purging stale local VM checkpoints to start clean from Step 0...")
-            for clean_dir in [args.history_dir, args.save_dir]:
-                if os.path.exists(clean_dir):
-                    for old_zip in glob.glob(os.path.join(clean_dir, "*.zip")):
-                        try:
-                            os.remove(old_zip)
-                            print(f"   🧹 Purged stale local checkpoint: {old_zip}")
-                        except Exception:
-                            pass
-            resume_path = None
-        else:
-            # Checkpoints exist in Drive backup -> Restore them into local pool
-            os.makedirs(args.history_dir, exist_ok=True)
-            print(f"📁 [Drive Backup] Found {len(drive_zips)} checkpoints in Drive backup. Restoring...")
-            for dz in drive_zips:
-                dest = os.path.join(args.history_dir, os.path.basename(dz))
-                if not os.path.exists(dest):
-                    shutil.copy2(dz, dest)
+        if args.backup_dir:
+            os.makedirs(args.backup_dir, exist_ok=True)
+            drive_zips = [
+                z for z in glob.glob(os.path.join(args.backup_dir, "*.zip"))
+                if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._") and "bc_pretrained" not in os.path.basename(z)
+            ]
 
-            if args.resume and args.resume.lower() not in ("none", "false", "no"):
-                if args.resume == "auto":
+            if not drive_zips:
+                print(f"📁 [Drive Backup] '{args.backup_dir}' has 0 checkpoints.")
+                if resume_path is None and not args.fresh:
+                    print("   🧹 Purging stale local VM checkpoints to start clean from Step 0...")
+                    for clean_dir in [args.history_dir, args.save_dir]:
+                        if os.path.exists(clean_dir):
+                            for old_zip in glob.glob(os.path.join(clean_dir, "*.zip")):
+                                try:
+                                    os.remove(old_zip)
+                                    print(f"   🧹 Purged stale local checkpoint: {old_zip}")
+                                except Exception:
+                                    pass
+            else:
+                # Checkpoints exist in Drive backup -> Restore them into local pool
+                os.makedirs(args.history_dir, exist_ok=True)
+                print(f"📁 [Drive Backup] Found {len(drive_zips)} checkpoints in Drive backup. Restoring...")
+                for dz in drive_zips:
+                    dest = os.path.join(args.history_dir, os.path.basename(dz))
+                    if not os.path.exists(dest):
+                        shutil.copy2(dz, dest)
+
+                if resume_path is None and args.resume == "auto":
                     drive_zips.sort(key=extract_step, reverse=True)
                     resume_path = drive_zips[0]
                     print(f"🔍 [Auto-Resume] Selected latest Drive checkpoint: {resume_path} (step: {extract_step(resume_path):,})")
+        else:
+            # No backup_dir specified (e.g. local PC execution)
+            if resume_path is None and args.resume and args.resume.lower() not in ("none", "false", "no"):
+                if args.resume == "auto":
+                    local_zips = [
+                        z for z in (glob.glob(os.path.join(args.history_dir, "*.zip")) + glob.glob(os.path.join(args.save_dir, "*.zip")))
+                        if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._") and "bc_pretrained" not in os.path.basename(z)
+                    ]
+                    if local_zips:
+                        local_zips.sort(key=extract_step, reverse=True)
+                        resume_path = local_zips[0]
+                        print(f"🔍 [Auto-Resume] Found {len(local_zips)} local checkpoints. Selected latest: {resume_path}")
                 elif os.path.exists(args.resume):
                     resume_path = args.resume
-                elif os.path.exists(os.path.join(args.backup_dir, os.path.basename(args.resume))):
-                    resume_path = os.path.join(args.backup_dir, os.path.basename(args.resume))
-    else:
-        # No backup_dir specified (e.g. local PC execution)
-        if args.resume and args.resume.lower() not in ("none", "false", "no"):
-            if args.resume == "auto":
-                local_zips = [
-                    z for z in (glob.glob(os.path.join(args.history_dir, "*.zip")) + glob.glob(os.path.join(args.save_dir, "*.zip")))
-                    if os.path.getsize(z) > 1000 and not os.path.basename(z).startswith("._") and "bc_pretrained" not in os.path.basename(z)
-                ]
-                if local_zips:
-                    local_zips.sort(key=extract_step, reverse=True)
-                    resume_path = local_zips[0]
-                    print(f"🔍 [Auto-Resume] Found {len(local_zips)} local checkpoints. Selected latest: {resume_path}")
-            elif os.path.exists(args.resume):
-                resume_path = args.resume
 
     # Initialize Self-Play Pool (workers run opponent inference on CPU for multi-process safety)
     pool = SelfPlayPool(

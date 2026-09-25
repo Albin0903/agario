@@ -148,9 +148,12 @@ class AgarEnv(gym.Env):
         # SOTA Minimalist Reward formulation (AgarCL / AgarIA standard)
         rewards_cfg = cfg.get("rewards", {})
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
-        self.eat_cell_reward = float(rewards_cfg.get("kill_reward", rewards_cfg.get("eat_cell_reward", 10.0)))
-        self.death_penalty_max = float(rewards_cfg.get("death_penalty_max", 5.0))
-        self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.05))
+        self.eat_cell_reward = float(rewards_cfg.get("kill_reward", rewards_cfg.get("eat_cell_reward", 25.0)))
+        self.death_penalty_max = float(rewards_cfg.get("death_penalty_max", 10.0))
+        self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.04))
+        self.hunt_reward_scale = float(rewards_cfg.get("hunt_reward_scale", 0.08))
+        self.split_strike_bonus = float(rewards_cfg.get("split_strike_bonus", 0.5))
+        self.split_waste_penalty = float(rewards_cfg.get("split_waste_penalty", 0.25))
 
         self.action_repeat = int(sim_cfg.get("action_repeat", 3))
         self.initial_player_mass = float(cfg.get("physics", {}).get("initial_player_mass", 20.0))
@@ -197,6 +200,11 @@ class AgarEnv(gym.Env):
         self.prev_mass = self.initial_player_mass
         self.prev_pellet_dist = -1.0
         self._last_pellet_dist = -1.0
+        self.prev_prey_dist = -1.0
+        self._last_prey_dist = -1.0
+        self._last_prey_dx = 0.0
+        self._last_prey_dy = 0.0
+        self._last_prey_mass = 0.0
         self.heuristic_bots: Dict[int, HeuristicBot] = {}
         self.total_cells_eaten = 0
         self.episode_pellets_total = 0
@@ -226,6 +234,7 @@ class AgarEnv(gym.Env):
 
         obs = self._build_observation()
         self.prev_pellet_dist = self._last_pellet_dist
+        self.prev_prey_dist = self._last_prey_dist
         info = {
             "player_mass": self.initial_player_mass,
             "step": self.current_step,
@@ -306,25 +315,52 @@ class AgarEnv(gym.Env):
         # 3. Moderate death penalty (AgarIA standard, never paralyzing)
         r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
 
-        # Build next observation (also updates self._last_pellet_dist)
+        # Tactical Split Gating: reward split aimed at prey, penalize blind split spam
+        r_split = 0.0
+        if engine_action[2] > 0.6 or total_splits > 0:
+            is_aimed_strike = False
+            if 40.0 < self._last_prey_dist < 320.0:
+                act_angle = math.atan2(float(engine_action[1]), float(engine_action[0]))
+                prey_angle = math.atan2(self._last_prey_dy, self._last_prey_dx)
+                angle_diff = abs((act_angle - prey_angle + math.pi) % (2.0 * math.pi) - math.pi)
+                if angle_diff < (math.pi / 4.0):  # within +/- 45 deg
+                    is_aimed_strike = True
+
+            if is_aimed_strike:
+                r_split = self.split_strike_bonus
+            else:
+                r_split = -self.split_waste_penalty
+
+        # Build next observation (also updates self._last_pellet_dist and self._last_prey_dist)
         obs = self._build_observation()
         curr_pellet_dist = self._last_pellet_dist
+        curr_prey_dist = self._last_prey_dist
 
-        # 4. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging
+        # 4. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging (damped for large cells)
         r_forage = 0.0
         if not died and self.prev_pellet_dist > 0 and curr_pellet_dist > 0:
+            forage_mod = 1.0 if current_mass < 60.0 else max(0.2, 60.0 / current_mass)
             if total_pellets_eaten > 0:
-                r_forage = self.forage_reward_scale
+                r_forage = self.forage_reward_scale * forage_mod
             else:
                 dist_delta = self.prev_pellet_dist - curr_pellet_dist
                 max_close = max(1.0, float(self.action_repeat) * self.v_max)
                 progress = np.clip(dist_delta / max_close, -1.0, 1.0)
-                r_forage = float(progress * self.forage_reward_scale)
+                r_forage = float(progress * self.forage_reward_scale * forage_mod)
+
+        # 5. Dense Potential-Based Reward Shaping (PBRS) for Hunting Preys (AgarCL / GoBigger)
+        r_hunt = 0.0
+        if not died and self.prev_prey_dist > 0 and curr_prey_dist > 0:
+            prey_dist_delta = self.prev_prey_dist - curr_prey_dist
+            max_close = max(1.0, float(self.action_repeat) * self.v_max)
+            prey_progress = np.clip(prey_dist_delta / max_close, -1.0, 1.0)
+            r_hunt = float(prey_progress * self.hunt_reward_scale)
 
         self.prev_pellet_dist = curr_pellet_dist
+        self.prev_prey_dist = curr_prey_dist
         self.prev_mass = current_mass
 
-        reward = float(r_growth + r_kill + r_death + r_forage)
+        reward = float(r_growth + r_kill + r_death + r_forage + r_hunt + r_split)
 
         terminated = bool(died)
         truncated = bool(self.current_step >= self.max_steps)
@@ -381,7 +417,7 @@ class AgarEnv(gym.Env):
         self._last_pellet_dist = nearest_dist
 
         # Separate preys and predators among other cells
-        preys: List[Tuple[float, float, float, float, float]] = []
+        preys: List[Tuple[float, float, float, float, float, float]] = []
         predators: List[Tuple[float, float, float, float, float]] = []
 
         for other_cell in self.engine.cells:
@@ -397,13 +433,25 @@ class AgarEnv(gym.Env):
             v_rel = math.hypot(other_cell.vx - avg_vx, other_cell.vy - avg_vy)
 
             if other_cell.mass <= 0.9 * my_mass:
-                preys.append((dist, dx, dy, dm, v_rel))
+                preys.append((dist, dx, dy, dm, v_rel, other_cell.mass))
             elif other_cell.mass >= 1.1 * my_mass:
                 predators.append((dist, dx, dy, dm, v_rel))
 
         # 3. 5 Prey Cells (20 floats) -> offset 24 to 44
         preys.sort(key=lambda item: item[0])
-        for i, (_, dx, dy, dm, v_rel) in enumerate(preys[:5]):
+        if pid == self.learning_player_id:
+            if preys:
+                self._last_prey_dist = preys[0][0]
+                self._last_prey_dx = preys[0][1]
+                self._last_prey_dy = preys[0][2]
+                self._last_prey_mass = preys[0][5]
+            else:
+                self._last_prey_dist = -1.0
+                self._last_prey_dx = 0.0
+                self._last_prey_dy = 0.0
+                self._last_prey_mass = 0.0
+
+        for i, (dist, dx, dy, dm, v_rel, *_) in enumerate(preys[:5]):
             base = 24 + i * 4
             obs[base] = float(np.clip(dx / view_r, -1.0, 1.0))
             obs[base + 1] = float(np.clip(dy / view_r, -1.0, 1.0))

@@ -369,6 +369,31 @@ def test_multicell_partial_loss_not_fatal():
     assert len(engine.get_player_cells(0)) == 0
 
 
+def test_subcells_remerge_while_moving_active():
+    """Verify sub-cells actively moving at full speed remerge automatically once cooldown expires."""
+    engine = AgarEngine(width=2000.0, height=2000.0, num_pellets=0, num_viruses=0, remerge_cooldown_ticks=5)
+    c = engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
+
+    # Split horizontally (towards right)
+    engine.step({0: np.array([1.0, 0.0, 0.8], dtype=np.float32)})
+    p_cells = engine.get_player_cells(0)
+    assert len(p_cells) == 2, "Player must split into 2 subcells"
+
+    # Agent is continuously moving right at full speed (direction action [1.0, 0.0, -1.0])
+    # The subcells must magnetic-remerge without manual teleportation!
+    remerged = False
+    for step_i in range(120):
+        engine.step({0: np.array([1.0, 0.0, -1.0], dtype=np.float32)})
+        current_cells = engine.get_player_cells(0)
+        if len(current_cells) == 1:
+            remerged = True
+            break
+
+    assert remerged, "Sub-cells must remerge while moving actively at full speed!"
+    assert math.isclose(engine.get_player_mass(0), 100.0, rel_tol=1e-3)
+
+
+
 
 
 

@@ -602,19 +602,30 @@ class AgarEngine:
                 decay = cell.mass * self.mass_decay_rate
                 cell.mass = max(100.0, cell.mass - decay)
 
-        # Natural centroid attraction when stationary or mouse is placed at centroid
+        # Centroid attraction:
+        # 1. Idle grouping: when target is near centroid (e.g. mouse placed on centroid or idle action).
+        # 2. SOTA / Agar.io Remerge Magnetism: when remerge_cooldown expires (== 0), subcells are
+        #    actively pulled inward toward the player centroid even when moving at full speed!
         for pid in unique_players:
             p_cells = self.get_player_cells(pid)
             if len(p_cells) > 1:
-                tx, ty = player_targets[pid]
+                tx, ty = player_targets.get(pid, (0.0, 0.0))
                 cx, cy, _ = self.get_player_centroid(pid)
-                if math.hypot(tx - cx, ty - cy) < 50.0:
-                    for c in p_cells:
-                        cdx = cx - c.x
-                        cdy = cy - c.y
-                        cdist = math.hypot(cdx, cdy)
-                        if cdist > 2.0:
+                is_idle = math.hypot(tx - cx, ty - cy) < 50.0
+
+                for c in p_cells:
+                    cdx = cx - c.x
+                    cdy = cy - c.y
+                    cdist = math.hypot(cdx, cdy)
+                    if cdist > 1.0:
+                        pull = 0.0
+                        if is_idle:
                             pull = min(2.5, cdist * 0.08)
+                        elif c.remerge_cooldown == 0:
+                            # Strong magnetic centripetal acceleration to guarantee remerge
+                            pull = min(4.0, max(0.8, cdist * 0.12))
+
+                        if pull > 0.0:
                             c.vx += (cdx / cdist) * pull
                             c.vy += (cdy / cdist) * pull
 
@@ -732,10 +743,10 @@ class AgarEngine:
                             if c_small is ci:
                                 break
                             continue
-                        elif dist < r_sum:
+                        elif dist < r_sum * 1.5:
                             # Gentle mass-weighted mutual attraction: smaller cell accelerates much faster towards larger cell
                             total_m = ci.mass + cj.mass
-                            pull_mag = min(2.0, (r_sum - dist) * 0.08)
+                            pull_mag = min(3.0, max(0.4, (r_sum * 1.5 - dist) * 0.10))
                             pull_i = pull_mag * (cj.mass / total_m)
                             pull_j = pull_mag * (ci.mass / total_m)
                             nx = dx / dist
