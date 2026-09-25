@@ -40,7 +40,7 @@ from stable_baselines3.common.utils import set_random_seed
 
 from src.env.gym_wrapper import AgarEnv
 from src.training.self_play_pool import SelfPlayPool
-from src.training.callbacks import SelfPlayCallback
+from src.training.callbacks import SelfPlayCallback, ProfilingCallback
 from src.training.policy_arch import (
     LayerNormMaskablePolicy,
     build_lr_schedule,
@@ -58,6 +58,13 @@ def make_env_fn(
 ) -> Callable[[], AgarEnv]:
     """Factory to instantiate vectorized environment instances with self-play opponents."""
     def _init() -> AgarEnv:
+        # Prevent CPU thread contention in parallel workers
+        try:
+            import torch
+            torch.set_num_threads(1)
+        except Exception:
+            pass
+
         bot_opponents: Dict[int, Any] = {}
         bot_cached_actions: Dict[int, np.ndarray] = {}
         step_counters: Dict[int, int] = {}
@@ -435,7 +442,7 @@ def main():
                 device=device,
             )
 
-    # Self-Play Callback
+    # Self-Play Callback & Profiling Callback
     self_play_callback = SelfPlayCallback(
         pool=pool,
         update_interval_steps=args.pool_interval,
@@ -447,12 +454,13 @@ def main():
         ent_coef_end=ent_coef_end,
         verbose=1,
     )
+    profiler_callback = ProfilingCallback()
 
     print(f"\nStarting MaskablePPO optimization loop for {args.total_timesteps:,} timesteps...")
     try:
         model.learn(
             total_timesteps=args.total_timesteps,
-            callback=self_play_callback,
+            callback=[self_play_callback, profiler_callback],
             progress_bar=False,
             reset_num_timesteps=not is_resumed,
         )

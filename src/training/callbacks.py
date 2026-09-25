@@ -230,3 +230,55 @@ class SelfPlayCallback(BaseCallback):
             raise IOError(f"Incomplete backup copy: {source}")
         os.replace(temporary, destination)
 
+
+class ProfilingCallback(BaseCallback):
+    """Profileur de boucle d'entraînement PPO : Rollout CPU vs GPU Update vs Callbacks."""
+
+    def __init__(self, verbose: int = 0):
+        super().__init__(verbose)
+        self.last_time = time.perf_counter()
+        self.rollout_start = 0.0
+        self.train_start = 0.0
+        self.rollout_duration = 0.0
+        self.train_duration = 0.0
+        self.iteration = 0
+
+    def _on_training_start(self) -> None:
+        self.last_time = time.perf_counter()
+        self.rollout_start = time.perf_counter()
+
+    def _on_rollout_start(self) -> None:
+        if self.train_start > 0.0 and self.rollout_duration > 0.0:
+            self.iteration += 1
+            n_steps = getattr(self.model, "n_steps", 2048)
+            n_envs = getattr(self.training_env, "num_envs", 8)
+            total_steps_batch = n_steps * n_envs
+            self.log_timing_summary(total_steps_batch)
+        self.rollout_start = time.perf_counter()
+
+    def _on_rollout_end(self) -> None:
+        self.rollout_duration = time.perf_counter() - self.rollout_start
+        self.train_start = time.perf_counter()
+
+    def _on_step(self) -> bool:
+        return True
+
+    def _on_training_end(self) -> None:
+        pass
+
+    def log_timing_summary(self, total_steps_batch: int) -> None:
+        self.train_duration = time.perf_counter() - self.train_start
+        total_time = self.rollout_duration + self.train_duration
+        fps = total_steps_batch / total_time if total_time > 0 else 0
+
+        rollout_pct = (self.rollout_duration / total_time) * 100 if total_time > 0 else 0
+        train_pct = (self.train_duration / total_time) * 100 if total_time > 0 else 0
+
+        print("\n" + "=" * 65)
+        print(f"⏱️  PROFILING ITERATION #{self.iteration} (Step: {self.num_timesteps})")
+        print(f"├─ Rollout CPU (Env + Rivaux + IPC) : {self.rollout_duration:6.2f} s ({rollout_pct:4.1f}%)")
+        print(f"├─ Train GPU (PPO Updates)          : {self.train_duration:6.2f} s ({train_pct:4.1f}%)")
+        print(f"├─ Débit global                     : {fps:6.1f} steps/s")
+        print("=" * 65 + "\n")
+
+
