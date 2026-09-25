@@ -70,3 +70,43 @@ def test_seed_reproducibility():
     np.testing.assert_allclose(env1.engine.pellets_xy, env2.engine.pellets_xy, atol=1e-5)
     np.testing.assert_allclose(env1.engine.viruses_xy, env2.engine.viruses_xy, atol=1e-5)
 
+
+def test_subcell_aware_prey_predator_observation():
+    """Verify that prey and predator classification accounts for individual subcell capabilities rather than sum mass."""
+    from src.env.agar_engine import Cell
+    env = AgarEnv()
+    env.reset(seed=42)
+
+    # Setup player 0 with 2 subcells: 150 mass (large) and 30 mass (small)
+    env.engine.cells.clear()
+    c_large = Cell(id=1, player_id=0, x=500.0, y=500.0, mass=150.0)
+    c_small = Cell(id=2, player_id=0, x=520.0, y=500.0, mass=30.0)
+
+    # Setup Enemy 1 (mass 60): can be eaten by c_large (150 >= 1.1*60), but eats c_small (60 >= 1.1*30)
+    c_enemy1 = Cell(id=3, player_id=1, x=600.0, y=500.0, mass=60.0)
+
+    # Setup Enemy 2 (mass 15): edible by both, cannot eat either
+    c_enemy2 = Cell(id=4, player_id=2, x=400.0, y=500.0, mass=15.0)
+
+    env.engine.cells.extend([c_large, c_small, c_enemy1, c_enemy2])
+    env.engine._cells_cache_valid = False
+
+    obs = env._build_observation(0)
+    assert obs.shape == (84,)
+    assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
+
+    # Both Enemy 1 and Enemy 2 are edible by our largest subcell (mass 150) -> must be in prey channel!
+    # Offset 24-28 (1st prey), 28-32 (2nd prey)
+    prey1_dx = obs[24]
+    prey2_dx = obs[28]
+    assert prey1_dx != 0.0 or prey2_dx != 0.0, "Edible enemies must appear in prey observation slots!"
+
+    # Nearest prey should be tracked accurately
+    assert env._last_prey_dist > 0.0
+    assert env._last_prey_mass in (15.0, 60.0)
+
+    # Enemy 1 threatens our small piece (mass 30) -> must appear in predator channel!
+    # Offset 44-48 (1st predator)
+    pred1_dx = obs[44]
+    assert pred1_dx != 0.0, "Enemy threatening subcell must appear in predator observation slots!"
+

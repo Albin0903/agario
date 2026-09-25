@@ -534,11 +534,13 @@ class AgarEngine:
             pid: {
                 "pellets_eaten": 0,
                 "cells_eaten": 0,
+                "subcells_lost": 0,
                 "ejected_mass_eaten": 0,
                 "died": False,
                 "splits": 0,
                 "ejects": 0,
                 "virus_exploded": False,
+                "virus_eaten": False,
             }
             for pid in unique_players
         }
@@ -655,23 +657,33 @@ class AgarEngine:
 
         self._cells_cache_valid = False
 
-        # 3. Update ejected mass movements
+        # 3. Update ejected mass movements (with authentic wall bounce)
         if self.ejected:
             surviving_ejected: List[EjectedMass] = []
             for em in self.ejected:
                 nx = em.x + em.vx
                 ny = em.y + em.vy
                 r = em.radius
-                if nx < r: em.x = r
-                elif nx > self.width - r: em.x = self.width - r
-                else: em.x = nx
+                if nx < r:
+                    em.x = r
+                    em.vx = -em.vx * 0.75  # Bounce off left wall
+                elif nx > self.width - r:
+                    em.x = self.width - r
+                    em.vx = -em.vx * 0.75  # Bounce off right wall
+                else:
+                    em.x = nx
 
-                if ny < r: em.y = r
-                elif ny > self.height - r: em.y = self.height - r
-                else: em.y = ny
+                if ny < r:
+                    em.y = r
+                    em.vy = -em.vy * 0.75  # Bounce off top wall
+                elif ny > self.height - r:
+                    em.y = self.height - r
+                    em.vy = -em.vy * 0.75  # Bounce off bottom wall
+                else:
+                    em.y = ny
 
-                em.vx *= 0.8
-                em.vy *= 0.8
+                em.vx *= 0.82
+                em.vy *= 0.82
                 em.ticks_remaining -= 1
                 surviving_ejected.append(em)
             self.ejected = surviving_ejected
@@ -865,8 +877,27 @@ class AgarEngine:
                             else:
                                 shoot_dx, shoot_dy = 1.0, 0.0
 
-                            nvx = float(np.clip(vx + shoot_dx * 200.0, 50.0, self.width - 50.0))
-                            nvy = float(np.clip(vy + shoot_dy * 200.0, 50.0, self.height - 50.0))
+                            # Project shot virus: check if any large cell is in the line of fire (up to 350 units)
+                            hit_cell = None
+                            for cell in self.cells:
+                                if cell.mass > self.virus_split_threshold:
+                                    cdx = cell.x - vx
+                                    cdy = cell.y - vy
+                                    proj = cdx * shoot_dx + cdy * shoot_dy
+                                    if 0.0 < proj < 350.0:
+                                        perp_sq = (cdx * cdx + cdy * cdy) - proj * proj
+                                        if perp_sq < ((cell.radius + self.virus_radius) ** 2):
+                                            hit_cell = cell
+                                            break
+
+                            if hit_cell is not None:
+                                self.step_events[hit_cell.player_id]["virus_exploded"] = True
+                                self._explode_cell_on_virus(hit_cell)
+                                nvx = float(self.rng.uniform(100.0, self.width - 100.0))
+                                nvy = float(self.rng.uniform(100.0, self.height - 100.0))
+                            else:
+                                nvx = float(np.clip(vx + shoot_dx * 280.0, 50.0, self.width - 50.0))
+                                nvy = float(np.clip(vy + shoot_dy * 280.0, 50.0, self.height - 50.0))
                             new_viruses_to_add.append((nvx, nvy))
 
             if new_viruses_to_add:
@@ -883,32 +914,47 @@ class AgarEngine:
         self.ejected = surviving_ejected
 
     def _resolve_virus_collisions(self) -> None:
-        """Resolve collisions between cells and static viruses."""
+        """Resolve collisions between cells and static viruses.
+
+        Official Agar.io Rules:
+        1. If cell.mass <= virus_split_threshold:
+           Cell is smaller than virus -> hides safely inside/under virus (no explosion).
+        2. If cell.mass > virus_split_threshold:
+           - If player ALREADY has max_subcells (16):
+             Cell absorbs the virus (+virus_mass to cell) without exploding!
+           - If player has < max_subcells:
+             Cell EXPLODES into fragments up to max_subcells!
+           In both cases, the virus is consumed and respawns elsewhere.
+        """
         if not self.cells:
             return
 
-        # Fast skip: viruses only explode cells with mass > virus_split_threshold
-        if not any(c.mass > self.virus_split_threshold for c in self.cells):
-            return
-
-        cell_xy = np.array([[c.x, c.y] for c in self.cells], dtype=np.float32)
-        cell_r = np.array([c.radius for c in self.cells], dtype=np.float32)
-        cell_r_sq = cell_r * cell_r
-
         for v_idx in range(self.num_viruses):
             vx, vy = self.viruses_xy[v_idx]
-            dx = cell_xy[:, 0] - vx
-            dy = cell_xy[:, 1] - vy
-            dist_sq = dx * dx + dy * dy
 
-            for c_idx, cell in enumerate(list(self.cells)):
-                if c_idx < len(dist_sq) and dist_sq[c_idx] < cell_r_sq[c_idx]:
+            for cell in list(self.cells):
+                dx = cell.x - vx
+                dy = cell.y - vy
+                dist_sq = dx * dx + dy * dy
+
+                # Collision: virus center inside cell radius
+                if dist_sq < (cell.radius * cell.radius):
                     if cell.mass > self.virus_split_threshold:
-                        self.step_events[cell.player_id]["virus_exploded"] = True
-                        self._explode_cell_on_virus(cell)
+                        p_cells = self.get_player_cells(cell.player_id)
+                        if len(p_cells) >= self.max_subcells:
+                            # 16-CELL ABSORPTION: player at maximum subcell cap absorbs the virus!
+                            cell.mass += self.virus_mass
+                            self.step_events[cell.player_id]["virus_eaten"] = True
+                        else:
+                            # CELL EXPLODES into fragments
+                            self.step_events[cell.player_id]["virus_exploded"] = True
+                            self._explode_cell_on_virus(cell)
+
+                        # Virus is consumed, respawns in a new location
                         self.viruses_xy[v_idx, 0] = float(self.rng.uniform(100.0, self.width - 100.0))
                         self.viruses_xy[v_idx, 1] = float(self.rng.uniform(100.0, self.height - 100.0))
-                        return
+                        self._cells_cache_valid = False
+                        break  # Move to next virus
 
     def _resolve_cell_interplay(self) -> None:
         """Resolve consumption between different players (Predator vs Prey).
@@ -958,6 +1004,7 @@ class AgarEngine:
                 eaten_indices.add(j)
                 self.cells[i].mass += self.cells[j].mass
                 self.step_events[self.cells[i].player_id]["cells_eaten"] += 1
+                self.step_events[self.cells[j].player_id]["subcells_lost"] += 1
 
         if eaten_indices:
             self.cells = [c for idx, c in enumerate(self.cells) if idx not in eaten_indices]

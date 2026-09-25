@@ -393,6 +393,63 @@ def test_subcells_remerge_while_moving_active():
     assert math.isclose(engine.get_player_mass(0), 100.0, rel_tol=1e-3)
 
 
+def test_virus_absorption_at_max_subcells():
+    """Verify that a player with 16 subcells absorbs a virus without exploding (vanilla Agar.io mechanic)."""
+    engine = AgarEngine(width=2000.0, height=2000.0, num_pellets=0, num_viruses=1, max_subcells=16)
+    engine.viruses_xy[0] = [500.0, 500.0]
+    engine.virus_masses[0] = 100.0
+    engine.virus_radii[0] = 24.0
+
+    # Create 16 subcells for player 0
+    engine.cells.clear()
+    for i in range(16):
+        c = Cell(
+            id=engine._next_cell_id,
+            player_id=0,
+            x=500.0 if i == 0 else 100.0 + i * 20.0,
+            y=500.0 if i == 0 else 100.0,
+            mass=150.0,
+            remerge_cooldown=1000,
+        )
+        engine._next_cell_id += 1
+        engine.cells.append(c)
+
+    initial_total_mass = engine.get_player_mass(0)
+    assert len(engine.get_player_cells(0)) == 16
+
+    events = engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+
+    # Must absorb +100 mass without exploding into more cells
+    p_cells_after = engine.get_player_cells(0)
+    assert len(p_cells_after) == 16, "Player at 16 cells must not explode!"
+    assert events[0]["virus_eaten"] is True, "Virus must be marked as eaten/absorbed"
+    assert math.isclose(engine.get_player_mass(0), initial_total_mass + 100.0, rel_tol=1e-3)
+
+
+def test_ejected_mass_wall_bounce():
+    """Verify that ejected mass rebounds off the arena boundary with reversed velocity."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0)
+    # Ejected piece near left wall moving left
+    em = EjectedMass(
+        id=1,
+        player_id=0,
+        x=15.0,
+        y=500.0,
+        vx=-15.0,
+        vy=0.0,
+        mass=12.0,
+        ticks_remaining=15,
+    )
+    engine.ejected.append(em)
+
+    engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+
+    # Velocity must have inverted (bounced off left wall to move right)
+    assert len(engine.ejected) == 1
+    assert engine.ejected[0].vx > 0.0, "Ejected mass should bounce off wall with inverted velocity!"
+    assert engine.ejected[0].x >= engine.ejected[0].radius
+
+
 
 
 

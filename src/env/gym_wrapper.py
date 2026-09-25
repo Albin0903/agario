@@ -173,8 +173,8 @@ class AgarEnv(gym.Env):
             v_base=self.v_base,
             v_min=float(cfg.get("physics", {}).get("v_min", 0.8)),
             radius_scale=float(cfg.get("physics", {}).get("radius_scale", 3.0)),
-            max_subcells=int(cfg.get("physics", {}).get("max_subcells", 4)),
-            min_split_mass=float(cfg.get("physics", {}).get("min_split_mass", 55.0)),
+            max_subcells=int(cfg.get("physics", {}).get("max_subcells", 16)),
+            min_split_mass=float(cfg.get("physics", {}).get("min_split_mass", 36.0)),
             remerge_cooldown_ticks=int(cfg.get("physics", {}).get("remerge_cooldown_ticks", 600)),
             remerge_cooldown_mass_factor=float(cfg.get("physics", {}).get("remerge_cooldown_mass_factor", 0.5)),
             split_boost_speed=float(cfg.get("physics", {}).get("split_boost_speed", 26.0)),
@@ -271,6 +271,13 @@ class AgarEnv(gym.Env):
         total_splits = 0
         died = False
 
+        pre_prey_dist = self._last_prey_dist
+        pre_prey_dx = self._last_prey_dx
+        pre_prey_dy = self._last_prey_dy
+        pre_prey_mass = self._last_prey_mass
+        pre_learning_cells = self.engine.get_player_cells(self.learning_player_id)
+        pre_max_subcell_mass = max((c.mass for c in pre_learning_cells), default=self.prev_mass)
+
         # Query bot macro-actions ONCE per step for all active bots (3x speedup)
         actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: engine_action}
         for bot_id in range(1, self.num_bots + 1):
@@ -317,14 +324,14 @@ class AgarEnv(gym.Env):
         r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
 
         # Natural Split Strike Bonus: positive reward when splitting towards edible prey in strike zone
-        # Only awarded if split piece (mass / 2) can actually consume the prey! (Agar.io eat_ratio = 1.1)
+        # Only awarded if split piece (pre_max_subcell_mass / 2) can actually consume the prey! (Agar.io eat_ratio = 1.1)
         # Zero artificial penalty: exploration is never taxed or paralyzed!
         r_split = 0.0
         if engine_action[2] > 0.6 or total_splits > 0:
-            if 40.0 < self._last_prey_dist < 320.0 and self._last_prey_mass > 0:
-                if (self.prev_mass / 2.0) > 1.15 * self._last_prey_mass:
+            if 40.0 < pre_prey_dist < 320.0 and pre_prey_mass > 0:
+                if (pre_max_subcell_mass / 2.0) > 1.15 * pre_prey_mass:
                     act_angle = math.atan2(float(engine_action[1]), float(engine_action[0]))
-                    prey_angle = math.atan2(self._last_prey_dy, self._last_prey_dx)
+                    prey_angle = math.atan2(pre_prey_dy, pre_prey_dx)
                     angle_diff = abs((act_angle - prey_angle + math.pi) % (2.0 * math.pi) - math.pi)
                     if angle_diff < (math.pi / 4.0):  # within +/- 45 deg
                         r_split = self.split_strike_bonus
@@ -335,8 +342,9 @@ class AgarEnv(gym.Env):
         curr_prey_dist = self._last_prey_dist
 
         # 4. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging (damped for large cells)
+        # Suppressed during split ticks to eliminate centroid displacement artifacts
         r_forage = 0.0
-        if not died and self.prev_pellet_dist > 0 and curr_pellet_dist > 0:
+        if not died and total_splits == 0 and self.prev_pellet_dist > 0 and curr_pellet_dist > 0:
             forage_mod = 1.0 if current_mass < 60.0 else max(0.2, 60.0 / current_mass)
             if total_pellets_eaten > 0:
                 r_forage = self.forage_reward_scale * forage_mod
@@ -347,14 +355,14 @@ class AgarEnv(gym.Env):
                 r_forage = float(progress * self.forage_reward_scale * forage_mod)
 
         # 5. Directional Pursuit Reward (Heading Alignment): rewards pointing towards edible prey
-        # Pure positive gradient for stalking and herding, immune to relative speed differentials
+        # Uses pre-step prey vector to evaluate exact decision direction
         r_hunt = 0.0
-        if not died and self._last_prey_dist > 0:
+        if not died and pre_prey_dist > 0:
             act_norm = math.hypot(float(engine_action[0]), float(engine_action[1]))
             if act_norm > 1e-4:
-                cos_align = (float(engine_action[0]) * self._last_prey_dx + float(engine_action[1]) * self._last_prey_dy) / (act_norm * self._last_prey_dist)
+                cos_align = (float(engine_action[0]) * pre_prey_dx + float(engine_action[1]) * pre_prey_dy) / (act_norm * pre_prey_dist)
                 if cos_align > 0.0:
-                    proximity = min(1.0, 350.0 / max(40.0, self._last_prey_dist))
+                    proximity = min(1.0, 350.0 / max(40.0, pre_prey_dist))
                     r_hunt = float(cos_align * self.hunt_reward_scale * proximity)
 
         self.prev_pellet_dist = curr_pellet_dist
@@ -401,6 +409,8 @@ class AgarEnv(gym.Env):
 
         cx, cy, cr = self.engine.get_player_centroid(pid)
         my_mass = self.engine.get_player_mass(pid)
+        max_subcell_mass = max(c.mass for c in my_cells)
+        min_subcell_mass = min(c.mass for c in my_cells)
         view_r = 500.0 + 2.0 * cr
 
         avg_vx = sum(c.vx for c in my_cells) / len(my_cells)
@@ -417,7 +427,7 @@ class AgarEnv(gym.Env):
         obs[4:24] = pellet_feats
         self._last_pellet_dist = nearest_dist
 
-        # Separate preys and predators among other cells
+        # Separate preys and predators based on authentic Agar.io subcell-level capabilities
         preys: List[Tuple[float, float, float, float, float, float]] = []
         predators: List[Tuple[float, float, float, float, float]] = []
 
@@ -431,14 +441,17 @@ class AgarEnv(gym.Env):
                 continue
 
             v_rel = math.hypot(other_cell.vx - avg_vx, other_cell.vy - avg_vy)
-            # Logarithmic relative mass scale: tanh(ln(m_other / m_self))
-            # Natural thresholds: prey (< -0.1), safe rival (+0.1 to +0.5), lethal split threat (> +0.65)
-            log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, my_mass))
-            log_ratio_norm = float(np.tanh(log_ratio))
 
-            if other_cell.mass <= 0.9 * my_mass:
+            # Authentic Prey condition: our largest cell can eat it! (other_cell.mass * 1.1 <= max_subcell_mass)
+            if other_cell.mass * 1.1 <= max_subcell_mass:
+                log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, max_subcell_mass))
+                log_ratio_norm = float(np.tanh(log_ratio))
                 preys.append((dist, dx, dy, log_ratio_norm, v_rel, other_cell.mass))
-            elif other_cell.mass >= 1.1 * my_mass:
+
+            # Authentic Predator condition: can eat at least one of our subcells! (other_cell.mass >= 1.1 * min_subcell_mass)
+            if other_cell.mass >= 1.1 * min_subcell_mass:
+                log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, min_subcell_mass))
+                log_ratio_norm = float(np.tanh(log_ratio))
                 predators.append((dist, dx, dy, log_ratio_norm, v_rel))
 
         # 3. 5 Prey Cells (20 floats) -> offset 24 to 44
@@ -477,12 +490,14 @@ class AgarEnv(gym.Env):
         v_dists = np.hypot(v_dx, v_dy)
         v_sorted = np.argsort(v_dists)[:4]
 
+        can_explode_on_virus = (max_subcell_mass > self.engine.virus_split_threshold) and (len(my_cells) < self.engine.max_subcells)
+        threat_sign = -1.0 if can_explode_on_virus else 1.0
+
         for i, v_idx in enumerate(v_sorted):
             base = 64 + i * 3
             if v_dists[v_idx] <= view_r:
                 obs[base] = float(np.clip(v_dx[v_idx] / view_r, -1.0, 1.0))
                 obs[base + 1] = float(np.clip(v_dy[v_idx] / view_r, -1.0, 1.0))
-                threat_sign = -1.0 if (my_mass > self.engine.virus_split_threshold) else 1.0
                 obs[base + 2] = threat_sign
 
         # 6. Distances to 4 arena walls (4 floats) -> offset 76 to 80
