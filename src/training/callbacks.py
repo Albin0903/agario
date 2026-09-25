@@ -46,6 +46,7 @@ class SelfPlayCallback(BaseCallback):
         # Rolling statistics buffers (window = 100)
         self.rolling_rewards = deque(maxlen=100)
         self.rolling_masses = deque(maxlen=100)
+        self.rolling_peaks = deque(maxlen=100)
         self.rolling_cells_eaten = deque(maxlen=100)
         self.rolling_pellets_eaten = deque(maxlen=100)
         self.rolling_splits = deque(maxlen=100)
@@ -77,6 +78,9 @@ class SelfPlayCallback(BaseCallback):
                 mass = info.get("player_mass", None)
                 if mass is not None:
                     self.rolling_masses.append(float(mass))
+                peak = info.get("peak_mass", None)
+                if peak is not None:
+                    self.rolling_peaks.append(float(peak))
                 self.rolling_splits.append(info.get("splits", 0))
 
             if i < len(dones) and dones[i]:
@@ -97,12 +101,14 @@ class SelfPlayCallback(BaseCallback):
             self.last_log_step = self.num_timesteps
             self.pool.sync_from_disk()
             avg_mass = float(np.mean(self.rolling_masses)) if self.rolling_masses else 0.0
+            avg_peak = float(np.mean(self.rolling_peaks)) if self.rolling_peaks else avg_mass
             avg_rew = float(np.mean(self.rolling_rewards)) if self.rolling_rewards else 0.0
             avg_eaten = float(np.mean(self.rolling_cells_eaten)) if self.rolling_cells_eaten else 0.0
             avg_pellets = float(np.mean(self.rolling_pellets_eaten)) if self.rolling_pellets_eaten else 0.0
 
             if self.logger is not None:
                 self.logger.record("agar/avg_mass", avg_mass)
+                self.logger.record("agar/peak_mass", avg_peak)
                 self.logger.record("agar/avg_reward", avg_rew)
                 self.logger.record("agar/cells_eaten", avg_eaten)
                 self.logger.record("agar/pellets_eaten", avg_pellets)
@@ -135,7 +141,7 @@ class SelfPlayCallback(BaseCallback):
             if self.verbose > 0:
                 print(
                     f"[Step {self.num_timesteps:8d}] "
-                    f"Mass: {avg_mass:5.1f} | "
+                    f"Mass: {avg_mass:5.1f} (Peak: {avg_peak:5.1f}) | "
                     f"Ep Rew: {avg_rew:7.2f} | "
                     f"Pellets/Ep: {avg_pellets:4.0f} | "
                     f"Kills/Ep: {avg_eaten:4.2f} | "

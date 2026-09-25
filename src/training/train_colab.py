@@ -129,7 +129,7 @@ def parse_args():
     parser.add_argument("--use-dummy-vec", action="store_true", help="Force DummyVecEnv instead of SubprocVecEnv")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume from, or 'auto'")
     parser.add_argument("--fresh", action="store_true", help="Force starting from scratch (wipe local & drive checkpoints and start clean at step 0)")
-    parser.add_argument("--max-rivals", type=int, default=20, help="Max neural rival bots per env; 20 enforces the configured 50/30/20 league")
+    parser.add_argument("--max-rivals", type=int, default=2, help="Max neural rival bots per env (default: 2, top 10% league; rest use microsecond Numba)")
     parser.add_argument("--warm-start", action="store_true", default=True, help="Warm-start policy network via behavioral cloning on HeuristicBot")
     parser.add_argument("--no-warm-start", action="store_false", dest="warm_start", help="Disable BC warm-start")
     parser.add_argument("--min-pool-step", type=int, default=200_000, help="Minimum step before expanding self-play pool")

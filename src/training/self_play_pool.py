@@ -174,6 +174,14 @@ class SelfPlayPool:
         """Scan history_dir on disk and load newly saved checkpoints in numerical order."""
         if not os.path.exists(self.history_dir):
             return 0
+        try:
+            mtime = os.path.getmtime(self.history_dir)
+            if hasattr(self, "_last_disk_mtime") and self._last_disk_mtime == mtime:
+                return 0
+            self._last_disk_mtime = mtime
+        except OSError:
+            pass
+
         loaded = 0
         existing_paths = set(entry.path for entry in self.pool)
         metadata = self._load_state()
