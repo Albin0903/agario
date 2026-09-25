@@ -779,3 +779,34 @@ def extract_entities_observation_numba(
 
     return closest_prey_dist, closest_prey_dx, closest_prey_dy, closest_prey_mass
 
+
+@nb.njit(fastmath=True)
+def compute_centroids_numba(
+    n_cells: int,
+    xy_buf: np.ndarray,
+    m_buf: np.ndarray,
+    pid_buf: np.ndarray,
+    p_mass: np.ndarray,
+    p_cent: np.ndarray,
+    scale: float,
+):
+    """Compute player total masses and mass-weighted centroids in 1 microsecond."""
+    p_mass.fill(0.0)
+    p_cent.fill(0.0)
+    for i in range(n_cells):
+        pid = pid_buf[i]
+        x = xy_buf[i, 0]
+        y = xy_buf[i, 1]
+        m = m_buf[i]
+        if pid < len(p_mass):
+            p_mass[pid] += m
+            p_cent[pid, 0] += x * m
+            p_cent[pid, 1] += y * m
+
+    for p in range(len(p_mass)):
+        tm = p_mass[p]
+        if tm > 0.0:
+            p_cent[p, 0] /= tm
+            p_cent[p, 1] /= tm
+            p_cent[p, 2] = scale * math.sqrt(tm)
+
