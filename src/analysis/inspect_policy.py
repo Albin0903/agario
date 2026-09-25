@@ -186,6 +186,8 @@ def probe_live_simulation(model: PPO, env: AgarEnv, num_steps: int = 1500):
                 splits_on_empty += 1
 
         obs, reward, terminated, truncated, info = env.step(action)
+        cells_eaten_total += info.get("cells_eaten", 0)
+        pellets_eaten_total += info.get("pellets_eaten", 0)
         curr_mass = float(info.get("player_mass", 20.0))
         if curr_mass > peak_mass:
             peak_mass = curr_mass
@@ -194,8 +196,6 @@ def probe_live_simulation(model: PPO, env: AgarEnv, num_steps: int = 1500):
         subcell_counts.append(subcells)
 
         if terminated or truncated:
-            cells_eaten_total += info.get("cells_eaten", 0)
-            pellets_eaten_total += info.get("pellets_eaten", 0)
             obs, info = env.reset()
 
     total_trig = max(1, int(np.sum(trigger_counts)))
