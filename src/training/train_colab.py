@@ -184,6 +184,7 @@ def main():
         return int(m.group(1)) if m else 0
 
     resume_path = None
+    teacher_path = None
 
     if args.fresh:
         print("🧹 [--fresh flag active] Purging local checkpoints to start clean from Step 0...")
@@ -358,14 +359,16 @@ def main():
                 "Architecture changed (MaskablePPO + LayerNorm). Starting a fresh V10 run. "
                 "Use --fresh to skip this warning."
             )
+            teacher_path = resume_path
             resume_path = None
     if not is_resumed:
         # Check if warm-start BC model is requested or available
-        bc_path = os.path.join(args.save_dir, "ppo_bc_pretrained.zip")
-        if args.backup_dir and os.path.exists(os.path.join(args.backup_dir, "ppo_bc_pretrained.zip")):
+        bc_filename = "ppo_v9_teacher_bc.zip" if teacher_path else "ppo_bc_pretrained.zip"
+        bc_path = os.path.join(args.save_dir, bc_filename)
+        if args.backup_dir and os.path.exists(os.path.join(args.backup_dir, bc_filename)):
             import shutil
             os.makedirs(args.save_dir, exist_ok=True)
-            shutil.copy2(os.path.join(args.backup_dir, "ppo_bc_pretrained.zip"), bc_path)
+            shutil.copy2(os.path.join(args.backup_dir, bc_filename), bc_path)
 
         if args.warm_start and not os.path.exists(bc_path):
             print("\n🎓 [Warm-Start] Pre-training policy network on HeuristicBot demonstrations (60s)...")
@@ -378,11 +381,12 @@ def main():
                 env_config_path=args.env_config,
                 device=device,
                 seed=args.seed,
+                teacher_path=teacher_path,
             )
             if args.backup_dir and os.path.exists(args.backup_dir):
                 try:
                     import shutil
-                    shutil.copy2(bc_path, os.path.join(args.backup_dir, "ppo_bc_pretrained.zip"))
+                    shutil.copy2(bc_path, os.path.join(args.backup_dir, bc_filename))
                 except Exception:
                     pass
 

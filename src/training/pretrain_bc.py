@@ -30,7 +30,12 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from sb3_contrib import MaskablePPO
 from src.env.gym_wrapper import AgarEnv, HeuristicBot
-from src.training.policy_arch import LayerNormMaskablePolicy, build_policy_kwargs, wrap_action_masker
+from src.training.policy_arch import (
+    LayerNormMaskablePolicy,
+    build_policy_kwargs,
+    load_trained_model,
+    wrap_action_masker,
+)
 
 
 def load_yaml(path: str) -> Dict[str, Any]:
@@ -44,11 +49,16 @@ def collect_demonstrations(
     num_samples: int = 25000,
     env_config: Optional[Dict[str, Any]] = None,
     seed: int = 42,
+    teacher: Optional[Any] = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Gather expert (observation, angle_target, trigger_target) tuples from HeuristicBot."""
-    print(f"[BC Pretrain] Collecting {num_samples:,} expert transitions from HeuristicBot...")
+    """Gather demonstrations from a V9 teacher or the heuristic fallback."""
+    source = "V9 teacher checkpoint" if teacher is not None else "HeuristicBot"
+    print(f"[BC Pretrain] Collecting {num_samples:,} expert transitions from {source}...")
     env = AgarEnv(config=env_config, seed=seed)
-    bot = HeuristicBot(player_id=env.learning_player_id, rng=np.random.default_rng(seed))
+    bot = None if teacher is not None else HeuristicBot(
+        player_id=env.learning_player_id,
+        rng=np.random.default_rng(seed),
+    )
 
     obs_list = []
     angle_list = []
@@ -58,12 +68,18 @@ def collect_demonstrations(
     samples_collected = 0
 
     while samples_collected < num_samples:
-        raw_act = bot.get_action(env.engine)
-        dx, dy = float(raw_act[0]), float(raw_act[1])
-        theta = math.atan2(dy, dx) % (2.0 * math.pi)
-        angle_idx = int(round(theta / (2.0 * math.pi / env.num_angles))) % env.num_angles
-        trig = float(raw_act[2])
-        trig_idx = 1 if trig > 0.6 else (2 if trig > 0.2 else 0)
+        if teacher is not None:
+            teacher_action, _ = teacher.predict(obs, deterministic=False)
+            action_array = np.asarray(teacher_action).reshape(-1)
+            angle_idx = int(action_array[0]) % env.num_angles
+            trig_idx = int(action_array[1]) % 3
+        else:
+            raw_act = bot.get_action(env.engine)
+            dx, dy = float(raw_act[0]), float(raw_act[1])
+            theta = math.atan2(dy, dx) % (2.0 * math.pi)
+            angle_idx = int(round(theta / (2.0 * math.pi / env.num_angles))) % env.num_angles
+            trig = float(raw_act[2])
+            trig_idx = 1 if trig > 0.6 else (2 if trig > 0.2 else 0)
 
         obs_list.append(obs.copy())
         angle_list.append(angle_idx)
@@ -96,6 +112,7 @@ def pretrain_policy(
     env_config_path: str = "config/env_config.yaml",
     device: str = "auto",
     seed: int = 42,
+    teacher_path: Optional[str] = None,
 ) -> str:
     """Pre-train PPO policy via behavioral cloning on expert demonstrations."""
     ppo_cfg = load_yaml(config_path)
@@ -107,10 +124,17 @@ def pretrain_policy(
     print(f"  Device: {dev} | Samples: {num_samples:,} | Epochs: {epochs}")
     print("=" * 65)
 
+    teacher = None
+    if teacher_path:
+        print(f"[BC Pretrain] Loading V9 teacher checkpoint: {teacher_path}")
+        teacher = load_trained_model(teacher_path, device=dev, allow_legacy=True)
+        teacher.policy.eval()
+
     obs_np, angles_np, trigs_np = collect_demonstrations(
         num_samples=num_samples,
         env_config=env_cfg,
         seed=seed,
+        teacher=teacher,
     )
 
     dataset = TensorDataset(
@@ -187,6 +211,7 @@ def main():
     parser.add_argument("--output", type=str, default="checkpoints/ppo/ppo_bc_pretrained.zip", help="Output path")
     parser.add_argument("--device", type=str, default="auto", help="Device ('cpu', 'cuda', 'auto')")
     parser.add_argument("--seed", type=int, default=42, help="Seed")
+    parser.add_argument("--teacher", type=str, default=None, help="Optional V9 PPO checkpoint used as BC teacher")
     args = parser.parse_args()
 
     pretrain_policy(
@@ -195,6 +220,7 @@ def main():
         epochs=args.epochs,
         device=args.device,
         seed=args.seed,
+        teacher_path=args.teacher,
     )
 
 
