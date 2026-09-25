@@ -82,20 +82,24 @@ def test_subcell_aware_prey_predator_observation():
     c_large = Cell(id=1, player_id=0, x=500.0, y=500.0, mass=150.0)
     c_small = Cell(id=2, player_id=0, x=520.0, y=500.0, mass=30.0)
 
-    # Setup Enemy 1 (mass 60): can be eaten by c_large (150 >= 1.1*60), but eats c_small (60 >= 1.1*30)
+    # Setup Enemy 1 (mass 60): edible by c_large (150 >= 1.1*60).
+    # Since our largest piece can eat it, it is PREY, not a predator!
     c_enemy1 = Cell(id=3, player_id=1, x=600.0, y=500.0, mass=60.0)
 
-    # Setup Enemy 2 (mass 15): edible by both, cannot eat either
+    # Setup Enemy 2 (mass 15): edible by both -> PREY!
     c_enemy2 = Cell(id=4, player_id=2, x=400.0, y=500.0, mass=15.0)
 
-    env.engine.cells.extend([c_large, c_small, c_enemy1, c_enemy2])
+    # Setup Enemy 3 (mass 200): larger than c_large (200 >= 1.1*150) -> TRUE PREDATOR!
+    c_enemy3 = Cell(id=5, player_id=3, x=500.0, y=700.0, mass=200.0)
+
+    env.engine.cells.extend([c_large, c_small, c_enemy1, c_enemy2, c_enemy3])
     env.engine._cells_cache_valid = False
 
     obs = env._build_observation(0)
     assert obs.shape == (84,)
     assert np.all(obs >= -1.0) and np.all(obs <= 1.0)
 
-    # Both Enemy 1 and Enemy 2 are edible by our largest subcell (mass 150) -> must be in prey channel!
+    # Both Enemy 1 (60) and Enemy 2 (15) are edible by our largest subcell (150) -> must be in prey channel!
     # Offset 24-28 (1st prey), 28-32 (2nd prey)
     prey1_dx = obs[24]
     prey2_dx = obs[28]
@@ -105,8 +109,8 @@ def test_subcell_aware_prey_predator_observation():
     assert env._last_prey_dist > 0.0
     assert env._last_prey_mass in (15.0, 60.0)
 
-    # Enemy 1 threatens our small piece (mass 30) -> must appear in predator channel!
+    # Enemy 3 (200) threatens our largest piece -> must appear in predator channel!
     # Offset 44-48 (1st predator)
     pred1_dx = obs[44]
-    assert pred1_dx != 0.0, "Enemy threatening subcell must appear in predator observation slots!"
+    assert pred1_dx != 0.0, "True enemy threatening largest cell must appear in predator observation slots!"
 

@@ -444,14 +444,14 @@ class AgarEnv(gym.Env):
             v_rel = math.hypot(other_cell.vx - avg_vx, other_cell.vy - avg_vy)
 
             # Authentic Prey condition: our largest cell can eat it! (other_cell.mass * 1.1 <= max_subcell_mass)
+            # If our largest cell can eat it, it is prey (our main cell can split-kill or chase it down)
             if other_cell.mass * 1.1 <= max_subcell_mass:
                 log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, max_subcell_mass))
                 log_ratio_norm = float(np.tanh(log_ratio))
                 preys.append((dist, dx, dy, log_ratio_norm, v_rel, other_cell.mass))
-
-            # Authentic Predator condition: can eat at least one of our subcells! (other_cell.mass >= 1.1 * min_subcell_mass)
-            if other_cell.mass >= 1.1 * min_subcell_mass:
-                log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, min_subcell_mass))
+            elif other_cell.mass >= 1.1 * min_subcell_mass:
+                # Authentic Predator condition: our largest cell CANNOT eat it, AND it threatens at least one subcell!
+                log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, max_subcell_mass))
                 log_ratio_norm = float(np.tanh(log_ratio))
                 predators.append((dist, dx, dy, log_ratio_norm, v_rel))
 
