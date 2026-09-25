@@ -15,6 +15,7 @@ physics:
   min_cell_mass: 10.0
   min_split_mass: 36.0          # Authentic Agar.io standard (36 mass splits into two 18 mass cells)
   max_subcells: 16              # Official Agar.io limit (16 cells max for splits and virus absorption)
+  max_cell_mass: 2250.0         # Authentic Agar.io mass cap (22,500 in 14k map -> 2,250 in 1.4k map)
   remerge_cooldown_ticks: 600
   remerge_cooldown_mass_factor: 0.5
   split_boost_speed: 26.0
@@ -23,7 +24,7 @@ physics:
   eject_spawn_mass: 12.0
   eject_speed: 18.0
   min_decay_mass: 100.0
-  mass_decay_rate: 0.00003
+  mass_decay_rate: 0.00008
 
 entities:
   num_pellets: 2000             # Dense food field for constant growth

@@ -174,6 +174,7 @@ class AgarEnv(gym.Env):
             v_min=float(cfg.get("physics", {}).get("v_min", 0.8)),
             radius_scale=float(cfg.get("physics", {}).get("radius_scale", 3.0)),
             max_subcells=int(cfg.get("physics", {}).get("max_subcells", 16)),
+            max_cell_mass=float(cfg.get("physics", {}).get("max_cell_mass", 2250.0)),
             min_split_mass=float(cfg.get("physics", {}).get("min_split_mass", 36.0)),
             remerge_cooldown_ticks=int(cfg.get("physics", {}).get("remerge_cooldown_ticks", 600)),
             remerge_cooldown_mass_factor=float(cfg.get("physics", {}).get("remerge_cooldown_mass_factor", 0.5)),
@@ -181,7 +182,7 @@ class AgarEnv(gym.Env):
             split_boost_decay=float(cfg.get("physics", {}).get("split_boost_decay", 0.90)),
             eject_loss_mass=float(cfg.get("physics", {}).get("eject_loss_mass", 16.0)),
             eject_spawn_mass=float(cfg.get("physics", {}).get("eject_spawn_mass", 12.0)),
-            mass_decay_rate=float(cfg.get("physics", {}).get("mass_decay_rate", 0.00003)),
+            mass_decay_rate=float(cfg.get("physics", {}).get("mass_decay_rate", 0.00008)),
             spatial_cell_size=float(sim_cfg.get("spatial_grid_cell_size", 100.0)),
             seed=seed,
         )

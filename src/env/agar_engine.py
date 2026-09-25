@@ -102,6 +102,7 @@ class AgarEngine:
         v_min: float = 0.5,
         radius_scale: float = 3.0,
         max_subcells: int = 16,
+        max_cell_mass: float = 2250.0,
         min_split_mass: float = 36.0,
         remerge_cooldown_ticks: int = 600,
         remerge_cooldown_mass_factor: float = 0.5,
@@ -126,6 +127,7 @@ class AgarEngine:
         self.v_min = v_min
         self.radius_scale = radius_scale
         self.max_subcells = max_subcells
+        self.max_cell_mass = float(max_cell_mass)
         self.min_split_mass = float(min_split_mass)
         self.remerge_cooldown_ticks = remerge_cooldown_ticks
         self.remerge_cooldown_mass_factor = float(remerge_cooldown_mass_factor)
@@ -274,10 +276,27 @@ class AgarEngine:
         self._cells_cache_valid = False
 
     def spawn_player(self, player_id: int, initial_mass: float = 20.0, xy: Optional[Tuple[float, float]] = None) -> Cell:
-        """Spawn an initial single cell for a player."""
+        """Spawn an initial single cell for a player safely outside existing player cells."""
         if xy is None:
-            x = float(self.rng.uniform(100.0, self.width - 100.0))
-            y = float(self.rng.uniform(100.0, self.height - 100.0))
+            best_x = float(self.rng.uniform(100.0, self.width - 100.0))
+            best_y = float(self.rng.uniform(100.0, self.height - 100.0))
+            if self.cells:
+                # Safe spawn rejection sampling: prevent spawning inside existing player cells or viruses
+                for _ in range(25):
+                    cx = float(self.rng.uniform(100.0, self.width - 100.0))
+                    cy = float(self.rng.uniform(100.0, self.height - 100.0))
+                    conflict = False
+                    for other in self.cells:
+                        dx = cx - other.x
+                        dy = cy - other.y
+                        safe_r = other.radius + 35.0
+                        if (dx * dx + dy * dy) < (safe_r * safe_r):
+                            conflict = True
+                            break
+                    if not conflict:
+                        best_x, best_y = cx, cy
+                        break
+            x, y = best_x, best_y
         else:
             x, y = xy
 
@@ -601,9 +620,10 @@ class AgarEngine:
                 cell.vx = 0.0
                 cell.vy = 0.0
 
-            # Apply slow mass decay only for large cells (vanilla Agar.io: mass > 100.0)
+            # Apply authentic Agar.io scaling mass decay for large cells (mass > 100.0)
             if self.mass_decay_rate > 0.0 and cell.mass > 100.0:
-                decay = cell.mass * self.mass_decay_rate
+                scale_factor = 1.0 + max(0.0, cell.mass - 100.0) / 800.0
+                decay = cell.mass * self.mass_decay_rate * scale_factor
                 cell.mass = max(100.0, cell.mass - decay)
 
         # Centroid attraction:
@@ -805,11 +825,45 @@ class AgarEngine:
         if len(eaten_pellet_indices) == 0:
             return
 
+        new_cells_from_cap: List[Cell] = []
         for i, c in enumerate(self.cells):
             count = int(cell_counts[i])
             if count > 0:
                 c.mass += count * self.pellet_mass
                 self.step_events[c.player_id]["pellets_eaten"] += count
+                if c.mass > self.max_cell_mass:
+                    p_cells = self.get_player_cells(c.player_id)
+                    if (len(p_cells) + len(new_cells_from_cap)) < self.max_subcells:
+                        half_mass = c.mass / 2.0
+                        c.mass = half_mass
+                        cooldown = self._compute_remerge_cooldown(half_mass)
+                        c.remerge_cooldown = cooldown
+                        spd = math.hypot(c.vx, c.vy)
+                        sdx = c.vx / spd if spd > 1e-4 else 1.0
+                        sdy = c.vy / spd if spd > 1e-4 else 0.0
+                        r = c.radius
+                        nx = float(np.clip(c.x + sdx * (r + 10.0), r, self.width - r))
+                        ny = float(np.clip(c.y + sdy * (r + 10.0), r, self.height - r))
+                        new_cell = Cell(
+                            id=self._next_cell_id,
+                            player_id=c.player_id,
+                            x=nx,
+                            y=ny,
+                            mass=half_mass,
+                            vx=c.vx,
+                            vy=c.vy,
+                            boost_vx=float(sdx * self.split_boost_speed),
+                            boost_vy=float(sdy * self.split_boost_speed),
+                            remerge_cooldown=cooldown,
+                        )
+                        self._next_cell_id += 1
+                        new_cells_from_cap.append(new_cell)
+                        self.step_events[c.player_id]["splits"] += 1
+                    else:
+                        c.mass = self.max_cell_mass
+
+        if new_cells_from_cap:
+            self.cells.extend(new_cells_from_cap)
 
         # Vectorized instant respawn of eaten pellets with virus halo clustering
         new_x, new_y = self._spawn_pellet_coords(len(eaten_pellet_indices))
@@ -1005,6 +1059,36 @@ class AgarEngine:
                 self.cells[i].mass += self.cells[j].mass
                 self.step_events[self.cells[i].player_id]["cells_eaten"] += 1
                 self.step_events[self.cells[j].player_id]["subcells_lost"] += 1
+                if self.cells[i].mass > self.max_cell_mass:
+                    p_cells = self.get_player_cells(self.cells[i].player_id)
+                    if len(p_cells) < self.max_subcells:
+                        half_m = self.cells[i].mass / 2.0
+                        self.cells[i].mass = half_m
+                        cd = self._compute_remerge_cooldown(half_m)
+                        self.cells[i].remerge_cooldown = cd
+                        spd = math.hypot(self.cells[i].vx, self.cells[i].vy)
+                        sdx = self.cells[i].vx / spd if spd > 1e-4 else 1.0
+                        sdy = self.cells[i].vy / spd if spd > 1e-4 else 0.0
+                        r = self.cells[i].radius
+                        nx = float(np.clip(self.cells[i].x + sdx * (r + 10.0), r, self.width - r))
+                        ny = float(np.clip(self.cells[i].y + sdy * (r + 10.0), r, self.height - r))
+                        new_c = Cell(
+                            id=self._next_cell_id,
+                            player_id=self.cells[i].player_id,
+                            x=nx,
+                            y=ny,
+                            mass=half_m,
+                            vx=self.cells[i].vx,
+                            vy=self.cells[i].vy,
+                            boost_vx=float(sdx * self.split_boost_speed),
+                            boost_vy=float(sdy * self.split_boost_speed),
+                            remerge_cooldown=cd,
+                        )
+                        self._next_cell_id += 1
+                        self.cells.append(new_c)
+                        self.step_events[self.cells[i].player_id]["splits"] += 1
+                    else:
+                        self.cells[i].mass = self.max_cell_mass
 
         if eaten_indices:
             self.cells = [c for idx, c in enumerate(self.cells) if idx not in eaten_indices]

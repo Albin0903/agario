@@ -450,6 +450,40 @@ def test_ejected_mass_wall_bounce():
     assert engine.ejected[0].x >= engine.ejected[0].radius
 
 
+def test_safe_player_spawning_never_inside_existing_cells():
+    """Verify that newly spawned players never spawn inside an existing predator's body."""
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0)
+    # Giant predator occupying the center
+    pred = engine.spawn_player(0, initial_mass=1500.0, xy=(500.0, 500.0))
+    pred_r = pred.radius  # ~116 units
+
+    # Spawn 30 new bots randomly
+    for bot_id in range(1, 31):
+        bot_cell = engine.spawn_player(bot_id, initial_mass=20.0)
+        dist = math.hypot(bot_cell.x - pred.x, bot_cell.y - pred.y)
+        assert dist >= pred_r, f"Bot {bot_id} must not spawn inside predator belly! Dist={dist:.1f}, R={pred_r:.1f}"
+
+
+def test_max_cell_mass_cap_and_autosplit():
+    """Verify that a cell exceeding max_cell_mass auto-splits if slots available or caps if at 16."""
+    engine = AgarEngine(width=2000.0, height=2000.0, num_pellets=0, num_viruses=0, max_subcells=16, max_cell_mass=2250.0)
+    c1 = engine.spawn_player(0, initial_mass=2240.0, xy=(500.0, 500.0))
+    c_food = Cell(id=engine._next_cell_id, player_id=1, x=500.0, y=500.0, mass=50.0)
+    engine._next_cell_id += 1
+    engine.cells.append(c_food)
+    engine._cells_cache_valid = False
+
+    # Step: c1 eats c_food -> mass reaches 2290 > 2250 -> must auto-split into 2 pieces of 1145!
+    engine.step({0: np.array([1.0, 0.0, -1.0], dtype=np.float32), 1: np.array([0.0, 0.0, -1.0], dtype=np.float32)})
+
+    p0_cells = engine.get_player_cells(0)
+    assert len(p0_cells) == 2, "Cell exceeding max_cell_mass must auto-split!"
+    for c in p0_cells:
+        assert c.mass <= 2250.0, "Subcells must be under max_cell_mass"
+    assert math.isclose(engine.get_player_mass(0), 2290.0, rel_tol=1e-3)
+
+
+
 
 
 
