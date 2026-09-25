@@ -46,7 +46,6 @@ from src.training.policy_arch import (
     build_lr_schedule,
     build_policy_kwargs,
     load_trained_model,
-    wrap_action_masker,
 )
 
 
@@ -102,8 +101,9 @@ def make_env_fn(
 
         env = AgarEnv(config=env_config, opponent_policy_fn=opponent_controller, seed=seed + rank)
         _init._cached_env = env
-        if env.action_type == "multidiscrete":
-            env = wrap_action_masker(env)
+        # SubprocVecEnv requires the environment itself to expose action_masks().
+        # AgarEnv implements that method directly; ActionMasker is only suitable
+        # for single-process wrappers.
         return env
 
     return _init
@@ -129,7 +129,7 @@ def parse_args():
     parser.add_argument("--use-dummy-vec", action="store_true", help="Force DummyVecEnv instead of SubprocVecEnv")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume from, or 'auto'")
     parser.add_argument("--fresh", action="store_true", help="Force starting from scratch (wipe local & drive checkpoints and start clean at step 0)")
-    parser.add_argument("--max-rivals", type=int, default=2, help="Max number of neural net rival bots per env in self-play (default: 2 for 4000+ FPS)")
+    parser.add_argument("--max-rivals", type=int, default=20, help="Max neural rival bots per env; 20 enforces the configured 50/30/20 league")
     parser.add_argument("--warm-start", action="store_true", default=True, help="Warm-start policy network via behavioral cloning on HeuristicBot")
     parser.add_argument("--no-warm-start", action="store_false", dest="warm_start", help="Disable BC warm-start")
     parser.add_argument("--min-pool-step", type=int, default=200_000, help="Minimum step before expanding self-play pool")
@@ -156,6 +156,13 @@ def main():
         device = "cuda" if torch.cuda.is_available() else "cpu"
     else:
         device = args.device
+
+    if device.startswith("cuda") and torch.cuda.is_available():
+        # A100 Tensor Cores accelerate these matmuls while preserving the
+        # float32 policy/value numerics used by PPO.
+        torch.set_float32_matmul_precision("high")
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
 
     print("=" * 65)
     print("  AGAR-RL: Autonomous Multi-Agent Deep Reinforcement Learning")
@@ -188,6 +195,9 @@ def main():
                         print(f"   🧹 Purged local checkpoint: {old_zip}")
                     except Exception:
                         pass
+            stale_normalization = os.path.join(args.save_dir, "vec_normalize.pkl")
+            if os.path.exists(stale_normalization):
+                os.remove(stale_normalization)
         # Also clean accidental early checkpoints in backup_dir
         if args.backup_dir and os.path.exists(args.backup_dir):
             for old_zip in glob.glob(os.path.join(args.backup_dir, "*.zip")):
@@ -231,6 +241,10 @@ def main():
                 # Checkpoints exist in Drive backup -> Restore them into local pool
                 os.makedirs(args.history_dir, exist_ok=True)
                 print(f"📁 [Drive Backup] Found {len(drive_zips)} checkpoints in Drive backup. Restoring...")
+                drive_pool_state = os.path.join(args.backup_dir, "pool_state.json")
+                local_pool_state = os.path.join(args.history_dir, "pool_state.json")
+                if os.path.exists(drive_pool_state) and not os.path.exists(local_pool_state):
+                    shutil.copy2(drive_pool_state, local_pool_state)
                 for dz in drive_zips:
                     dest = os.path.join(args.history_dir, os.path.basename(dz))
                     if not os.path.exists(dest):
@@ -260,6 +274,9 @@ def main():
         max_size=int(ppo_cfg.get("self_play", {}).get("max_pool_size", 10)),
         history_dir=args.history_dir,
         heuristic_ratio=float(ppo_cfg.get("self_play", {}).get("heuristic_opponent_ratio", 0.3)),
+        current_ratio=float(ppo_cfg.get("self_play", {}).get("current_opponent_ratio", 0.2)),
+        pfsp_power=float(ppo_cfg.get("self_play", {}).get("pfsp_power", 1.5)),
+        seed=args.seed,
         device="cpu",
     )
     pool.sync_from_disk()
@@ -298,7 +315,10 @@ def main():
         print("📊 [VecNormalize] Initializing running reward normalization (norm_obs=False, norm_reward=True, clip=10.0)")
         vec_env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, clip_reward=10.0, gamma=gamma)
     gae_lambda = float(ppo_cfg.get("ppo", {}).get("gae_lambda", args.gae_lambda))
+    target_kl = ppo_cfg.get("ppo", {}).get("target_kl", 0.05)
+    target_kl = float(target_kl) if target_kl is not None else None
     ent_coef = float(ppo_cfg.get("ppo", {}).get("ent_coef", args.ent_coef))
+    ent_coef_end = float(ppo_cfg.get("ppo", {}).get("ent_coef_end", 0.001))
     n_steps = int(ppo_cfg.get("ppo", {}).get("n_steps", args.n_steps))
     batch_size = int(ppo_cfg.get("ppo", {}).get("batch_size", args.batch_size))
     n_epochs = int(ppo_cfg.get("ppo", {}).get("n_epochs", 8))
@@ -380,6 +400,7 @@ def main():
                     n_epochs=n_epochs,
                     gamma=gamma,
                     gae_lambda=gae_lambda,
+                    target_kl=target_kl,
                     ent_coef=ent_coef,
                     vf_coef=0.5,
                     max_grad_norm=0.5,
@@ -400,6 +421,7 @@ def main():
                 n_epochs=n_epochs,
                 gamma=gamma,
                 gae_lambda=gae_lambda,
+                target_kl=target_kl,
                 ent_coef=ent_coef,
                 vf_coef=0.5,
                 max_grad_norm=0.5,
@@ -417,6 +439,8 @@ def main():
         log_interval_steps=5_000,
         min_pool_step=args.min_pool_step,
         backup_dir=args.backup_dir,
+        ent_coef_start=ent_coef,
+        ent_coef_end=ent_coef_end,
         verbose=1,
     )
 

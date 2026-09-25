@@ -32,7 +32,7 @@ entities:
   num_viruses: 8                # Authentic virus hazards and shields
   virus_mass: 100.0
   virus_radius: 24.0
-  virus_split_threshold: 140.0
+  virus_split_threshold: 130.0        # Cells above 130 split on virus contact
 
 observation:
   view_radius_base: 500.0
@@ -48,15 +48,9 @@ action:
   num_angles: 24                # 360 / 24 = 15 degrees resolution
 
 rewards:
-  mass_scale: 1.0               # Delta mass scaling (AgarCL standard: Delta M / M_0)
-  kill_reward_multiplier: 1.5   # Proportional combat payoff based on consumed victim mass
-  kill_reward: 0.0              # Removed arbitrary +25 scalar (eliminated suicide-for-tiny-kills bias)
+  mass_scale: 1.0               # Signed delta mass: growth positive, loss negative
+  peak_mass_scale: 1.0          # Additional reward for exceeding the episode peak
   death_penalty_max: 10.0       # Terminal penalty on being eaten
-  forage_reward_scale: 0.02     # Light PBRS gradient towards closest pellet (damped for large cells)
-  hunt_reward_scale: 0.05       # Subtle directional pursuit alignment
-  split_strike_bonus: 0.0       # Purified in V9: zero artificial split bonus (eliminates panic split bias)
-  split_waste_penalty: 0.0      # Zero artificial toll penalty
-  split_invalid_penalty: 0.05   # Physical feedback when attempting split with insufficient mass or at 16 cells
 
 simulation:
   max_steps: 3500               # Match length in ticks

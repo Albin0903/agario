@@ -148,14 +148,8 @@ class AgarEnv(gym.Env):
         # SOTA Minimalist Reward formulation (AgarCL / AgarIA / GoBigger standard)
         rewards_cfg = cfg.get("rewards", {})
         self.mass_scale = float(rewards_cfg.get("mass_scale", 1.0))
-        self.kill_reward_multiplier = float(rewards_cfg.get("kill_reward_multiplier", 1.5))
-        self.eat_cell_reward = float(rewards_cfg.get("kill_reward", 0.0))
         self.death_penalty_max = float(rewards_cfg.get("death_penalty_max", 10.0))
-        self.forage_reward_scale = float(rewards_cfg.get("forage_reward_scale", 0.02))
-        self.hunt_reward_scale = float(rewards_cfg.get("hunt_reward_scale", 0.05))
-        self.split_strike_bonus = float(rewards_cfg.get("split_strike_bonus", 0.0))
-        self.split_waste_penalty = float(rewards_cfg.get("split_waste_penalty", 0.0))
-        self.split_invalid_penalty = float(rewards_cfg.get("split_invalid_penalty", 0.05))
+        self.peak_mass_scale = float(rewards_cfg.get("peak_mass_scale", 1.0))
 
         self.action_repeat = int(sim_cfg.get("action_repeat", 3))
         self.initial_player_mass = float(cfg.get("physics", {}).get("initial_player_mass", 20.0))
@@ -172,7 +166,7 @@ class AgarEnv(gym.Env):
             num_viruses=int(cfg.get("entities", {}).get("num_viruses", 8)),
             virus_mass=float(cfg.get("entities", {}).get("virus_mass", 100.0)),
             virus_radius=float(cfg.get("entities", {}).get("virus_radius", 24.0)),
-            virus_split_threshold=float(cfg.get("entities", {}).get("virus_split_threshold", 140.0)),
+            virus_split_threshold=float(cfg.get("entities", {}).get("virus_split_threshold", 130.0)),
             eat_ratio=float(cfg.get("physics", {}).get("eat_ratio", 1.1)),
             v_base=self.v_base,
             v_min=float(cfg.get("physics", {}).get("v_min", 0.8)),
@@ -204,6 +198,7 @@ class AgarEnv(gym.Env):
 
         self.current_step = 0
         self.prev_mass = self.initial_player_mass
+        self.peak_mass = self.initial_player_mass
         self.prev_pellet_dist = -1.0
         self._last_pellet_dist = -1.0
         self.prev_prey_dist = -1.0
@@ -235,6 +230,7 @@ class AgarEnv(gym.Env):
 
     def reset(
         self,
+        *,
         seed: Optional[int] = None,
         options: Optional[Dict[str, Any]] = None,
     ) -> Tuple[np.ndarray, Dict[str, Any]]:
@@ -253,6 +249,7 @@ class AgarEnv(gym.Env):
             self.heuristic_bots[bot_id] = HeuristicBot(bot_id, rng=np.random.default_rng(seed))
 
         self.prev_mass = self.initial_player_mass
+        self.peak_mass = self.initial_player_mass
         self.total_cells_eaten = 0
         self.episode_pellets_total = 0
 
@@ -295,10 +292,6 @@ class AgarEnv(gym.Env):
         total_splits = 0
         died = False
 
-        pre_prey_dist = self._last_prey_dist
-        pre_prey_dx = self._last_prey_dx
-        pre_prey_dy = self._last_prey_dy
-        pre_prey_mass = self._last_prey_mass
         pre_learning_cells = self.engine.get_player_cells(self.learning_player_id)
         pre_max_subcell_mass = max((c.mass for c in pre_learning_cells), default=self.prev_mass)
 
@@ -337,81 +330,40 @@ class AgarEnv(gym.Env):
         self.total_cells_eaten += total_cells_eaten
         self.episode_pellets_total += total_pellets_eaten
 
-        # SOTA Minimalist Reward (AgarCL / AgarIA / GoBigger standard):
-        # 1. Normalized mass gain (strictly positive on eating pellets or cells)
+        # Minimal V10 objective: signed mass progress plus peak progression.
         delta_mass = current_mass - self.prev_mass
+        previous_peak = self.peak_mass
+        self.peak_mass = max(self.peak_mass, current_mass)
+        new_peak_delta = self.peak_mass - previous_peak
         r_growth = (delta_mass / self.initial_player_mass) * self.mass_scale
-
-        # 2. Combat payoff strictly proportional to victim mass (GoBigger standard)
-        # Prevents valuing a 10-mass bot equally to a 200-mass bot!
-        r_kill = (total_mass_eaten / self.initial_player_mass) * self.kill_reward_multiplier
-        if self.eat_cell_reward > 0.0:
-            r_kill += self.eat_cell_reward * float(total_cells_eaten)
-
-        # 3. Moderate death penalty (AgarIA standard, never paralyzing)
-        r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
-
-        # 4. Action Invalidity Feedback for Split (Physical Feedback)
-        # If the agent attempts a split when it's physically impossible (mass < 36 or at 16 cells),
-        # apply light friction penalty to discourage wasted commands.
-        r_split = 0.0
-        if engine_action[2] > 0.6:
-            if total_splits == 0 and (pre_max_subcell_mass < self.min_split_mass or len(pre_learning_cells) >= self.max_subcells):
-                r_split = -self.split_invalid_penalty
-            elif self.split_strike_bonus > 0.0 and 40.0 < pre_prey_dist < 320.0 and pre_prey_mass > 0:
-                if (pre_max_subcell_mass / 2.0) > 1.15 * pre_prey_mass:
-                    act_angle = math.atan2(float(engine_action[1]), float(engine_action[0]))
-                    prey_angle = math.atan2(pre_prey_dy, pre_prey_dx)
-                    angle_diff = abs((act_angle - prey_angle + math.pi) % (2.0 * math.pi) - math.pi)
-                    if angle_diff < (math.pi / 4.0):  # within +/- 45 deg
-                        r_split = self.split_strike_bonus
+        r_peak = (new_peak_delta / self.initial_player_mass) * self.peak_mass_scale
+        r_death = -min(self.death_penalty_max, self.peak_mass / self.initial_player_mass) if died else 0.0
 
         # Build next observation (also updates self._last_pellet_dist and self._last_prey_dist)
         obs = self._build_observation()
         curr_pellet_dist = self._last_pellet_dist
-        curr_prey_dist = self._last_prey_dist
-
-        # 4. Dense Potential-Based Reward Shaping (PBRS) for Food Foraging (damped for large cells)
-        # Suppressed during split ticks to eliminate centroid displacement artifacts
-        r_forage = 0.0
-        if not died and total_splits == 0 and self.prev_pellet_dist > 0 and curr_pellet_dist > 0:
-            forage_mod = 1.0 if current_mass < 60.0 else max(0.2, 60.0 / current_mass)
-            if total_pellets_eaten > 0:
-                r_forage = self.forage_reward_scale * forage_mod
-            else:
-                dist_delta = self.prev_pellet_dist - curr_pellet_dist
-                max_close = max(1.0, float(self.action_repeat) * self.v_max)
-                progress = np.clip(dist_delta / max_close, -1.0, 1.0)
-                r_forage = float(progress * self.forage_reward_scale * forage_mod)
-
-        # 5. Directional Pursuit Reward (Heading Alignment): rewards pointing towards edible prey
-        # Uses pre-step prey vector to evaluate exact decision direction
-        r_hunt = 0.0
-        if not died and pre_prey_dist > 0:
-            act_norm = math.hypot(float(engine_action[0]), float(engine_action[1]))
-            if act_norm > 1e-4:
-                cos_align = (float(engine_action[0]) * pre_prey_dx + float(engine_action[1]) * pre_prey_dy) / (act_norm * pre_prey_dist)
-                if cos_align > 0.0:
-                    proximity = min(1.0, 350.0 / max(40.0, pre_prey_dist))
-                    r_hunt = float(cos_align * self.hunt_reward_scale * proximity)
 
         self.prev_pellet_dist = curr_pellet_dist
-        self.prev_prey_dist = curr_prey_dist
         self.prev_mass = current_mass
 
-        reward = float(r_growth + r_kill + r_death + r_forage + r_hunt + r_split)
+        reward = float(r_growth + r_peak + r_death)
 
         terminated = bool(died)
         truncated = bool(self.current_step >= self.max_steps)
 
         info = {
             "player_mass": current_mass,
+            "peak_mass": self.peak_mass,
             "cells_eaten": total_cells_eaten,
             "pellets_eaten": total_pellets_eaten,
             "episode_pellets": self.episode_pellets_total,
             "episode_kills": self.total_cells_eaten,
             "died": died,
             "splits": total_splits,
+            "reward_mass": r_growth,
+            "reward_mass_growth": r_growth,
+            "reward_peak": r_peak,
+            "reward_death": r_death,
             "step": self.current_step,
             "num_subcells": len(self.engine.get_player_cells(self.learning_player_id)),
         }

@@ -48,7 +48,7 @@ def make_norm(dim: int, norm_type: str = "layernorm") -> nn.Module:
 
 
 class LayerNormExtractor(BaseFeaturesExtractor):
-    """Observation trunk: Linear(obs, 512) -> Norm(512) -> ReLU."""
+    """Observation trunk: Linear(obs, 512) -> Norm(512) -> SiLU."""
 
     def __init__(
         self,
@@ -61,7 +61,7 @@ class LayerNormExtractor(BaseFeaturesExtractor):
         self.net = nn.Sequential(
             nn.Linear(n_input, features_dim),
             make_norm(features_dim, norm_type),
-            nn.ReLU(),
+            nn.SiLU(),
         )
 
     def forward(self, observations: torch.Tensor) -> torch.Tensor:
@@ -183,16 +183,18 @@ def build_policy_kwargs(ppo_cfg: Dict[str, Any]) -> Dict[str, Any]:
     norm_type = str(policy_cfg.get("norm", "layernorm")).lower()
     return {
         "net_arch": cfg_net_arch,
-        "activation_fn": torch.nn.ReLU,
+        "activation_fn": torch.nn.SiLU,
         "norm_type": norm_type,
         "features_extractor_class": LayerNormExtractor,
         "features_extractor_kwargs": dict(features_dim=features_dim, norm_type=norm_type),
     }
 
 
-def load_trained_model(path: str, **kwargs):
-    """Load a V10 MaskablePPO zip, falling back to vanilla PPO for older checkpoints."""
+def load_trained_model(path: str, allow_legacy: bool = True, **kwargs):
+    """Load MaskablePPO, optionally allowing legacy vanilla PPO checkpoints."""
     last_error: Optional[Exception] = None
+    if not allow_legacy:
+        raise RuntimeError(f"'{path}' is not a V10 MaskablePPO checkpoint") from last_error
     try:
         from sb3_contrib import MaskablePPO
 
