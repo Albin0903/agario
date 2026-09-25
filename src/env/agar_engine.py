@@ -392,17 +392,20 @@ class AgarEngine:
 
     def get_player_cells(self, player_id: int) -> List[Cell]:
         """Return all active cells belonging to a specific player (O(1) cached)."""
-        self._refresh_player_cache()
+        if not self._cells_cache_valid:
+            self._refresh_player_cache()
         return self._player_cells_cache.get(player_id, [])
 
     def get_player_mass(self, player_id: int) -> float:
         """Compute the total mass of a player across all their subcells (O(1) cached)."""
-        self._refresh_player_cache()
+        if not self._cells_cache_valid:
+            self._refresh_player_cache()
         return self._player_mass_cache.get(player_id, 0.0)
 
     def get_player_centroid(self, player_id: int) -> Tuple[float, float, float]:
         """Compute the mass-weighted centroid (x, y) and effective radius of a player (O(1) cached)."""
-        self._refresh_player_cache()
+        if not self._cells_cache_valid:
+            self._refresh_player_cache()
         return self._player_centroid_cache.get(player_id, (self.width / 2.0, self.height / 2.0, 10.0))
 
     def _compute_remerge_cooldown(self, mass: float) -> int:
@@ -799,18 +802,15 @@ class AgarEngine:
         if len(self.cells) < 2:
             return
 
-        # Fast path: check if any player actually has > 1 cell
-        pids = [c.player_id for c in self.cells]
-        if len(pids) == len(set(pids)):
+        if not self._cells_cache_valid:
+            self._refresh_player_cache()
+
+        # Fast path: check if any player actually has > 1 cell (O(1) zero allocation)
+        if len(self.cells) == len(self._player_cells_cache):
             return
 
-        # Group cells by player
-        player_groups: Dict[int, List[Cell]] = {}
-        for c in self.cells:
-            player_groups.setdefault(c.player_id, []).append(c)
-
         surviving: List[Cell] = []
-        for pid, p_cells in player_groups.items():
+        for pid, p_cells in self._player_cells_cache.items():
             if len(p_cells) <= 1:
                 surviving.extend(p_cells)
                 continue

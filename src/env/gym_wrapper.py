@@ -23,6 +23,7 @@ from src.env.physics_fast import (
     find_single_nearest_pellet_numba,
     find_single_nearest_pellet_candidates_numba,
     compute_heuristic_threat_prey,
+    compute_bot_action_fast,
     extract_entities_observation_numba,
 )
 
@@ -34,6 +35,7 @@ class HeuristicBot:
         self.player_id = player_id
         self.rng = rng if rng is not None else np.random.default_rng()
         self.split_cooldown = 0
+        self._action_buf = np.zeros(3, dtype=np.float32)
 
     def get_action(self, engine: AgarEngine) -> np.ndarray:
         if self.split_cooldown > 0:
@@ -41,75 +43,37 @@ class HeuristicBot:
 
         p_cells = engine.get_player_cells(self.player_id)
         if not p_cells:
-            return np.array([0.0, 0.0, -1.0], dtype=np.float32)
+            self._action_buf[0] = 0.0
+            self._action_buf[1] = 0.0
+            self._action_buf[2] = -1.0
+            return self._action_buf
 
         cx, cy, cr = engine.get_player_centroid(self.player_id)
         my_mass = engine.get_player_mass(self.player_id)
-        view_r = 500.0 + 2.0 * cr
+        rng_split = float(self.rng.random())
+        rng_ang = float(self.rng.uniform(0.0, 2.0 * math.pi))
 
-        threat_x, threat_y, prey_dx, prey_dy, closest_prey_dist, closest_prey_mass = compute_heuristic_threat_prey(
-            cx, cy, cr, my_mass, engine.cells_xy, engine.cells_mass, engine.cells_pid, self.player_id, view_r
+        dx, dy, trig, new_cooldown = compute_bot_action_fast(
+            cx,
+            cy,
+            cr,
+            my_mass,
+            len(p_cells),
+            self.split_cooldown,
+            engine.cells_xy,
+            engine.cells_mass,
+            engine.cells_pid,
+            self.player_id,
+            engine.viruses_xy,
+            engine.pellets_xy,
+            rng_split,
+            rng_ang,
         )
-
-        # Avoid viruses if mass > 130
-        virus_avoid_x = 0.0
-        virus_avoid_y = 0.0
-        if my_mass > 130.0 and len(engine.viruses_xy) > 0:
-            for v in range(len(engine.viruses_xy)):
-                vx = engine.viruses_xy[v, 0]
-                vy = engine.viruses_xy[v, 1]
-                v_dx = vx - cx
-                if abs(v_dx) < (cr + 50.0):
-                    v_dy = vy - cy
-                    if abs(v_dy) < (cr + 50.0):
-                        v_dist = math.hypot(v_dx, v_dy)
-                        if 1e-4 < v_dist < (cr + 50.0):
-                            w = 1.0 / max(10.0, v_dist)
-                            virus_avoid_x -= (v_dx / v_dist) * w
-                            virus_avoid_y -= (v_dy / v_dist) * w
-
-        threat_norm = math.hypot(threat_x, threat_y)
-        virus_norm = math.hypot(virus_avoid_x, virus_avoid_y)
-
-        # 1. Primary instinct: Flee from predators
-        if threat_norm > 1e-4:
-            return np.array([threat_x / threat_norm, threat_y / threat_norm, -1.0], dtype=np.float32)
-
-        # 2. Avoid popping on viruses
-        if virus_norm > 1e-4:
-            return np.array([virus_avoid_x / virus_norm, virus_avoid_y / virus_norm, -1.0], dtype=np.float32)
-
-        # 3. Disciplined tactical split: ONLY when completely safe and highly advantageous
-        can_split = (
-            self.split_cooldown == 0
-            and threat_norm < 1e-4
-            and len(p_cells) <= 2
-            and my_mass >= 60.0
-            and 120.0 < closest_prey_dist < 240.0
-            and my_mass >= 2.5 * closest_prey_mass
-            and self.rng.random() < 0.08
-        )
-        if can_split:
-            self.split_cooldown = 150  # 5-second cooldown at 30Hz
-            return np.array([prey_dx, prey_dy, 0.8], dtype=np.float32)
-
-        # 4. Normal prey pursuit without splitting
-        if closest_prey_dist < 320.0 and my_mass >= 1.2 * closest_prey_mass:
-            return np.array([prey_dx, prey_dy, -1.0], dtype=np.float32)
-
-        # 5. Forage nearest pellet
-        pellet_candidates = np.asarray(
-            engine.spatial_grid.query_circle(cx, cy, min(view_r, 350.0)),
-            dtype=np.int32,
-        )
-        found, p_dx, p_dy = find_single_nearest_pellet_candidates_numba(
-            cx, cy, engine.pellets_xy, pellet_candidates, max_dist=min(view_r, 350.0)
-        )
-        if found:
-            return np.array([p_dx, p_dy, -1.0], dtype=np.float32)
-
-        ang = float(self.rng.uniform(0.0, 2.0 * math.pi))
-        return np.array([math.cos(ang), math.sin(ang), -1.0], dtype=np.float32)
+        self.split_cooldown = new_cooldown
+        self._action_buf[0] = dx
+        self._action_buf[1] = dy
+        self._action_buf[2] = trig
+        return self._action_buf
 
 
 class AgarEnv(gym.Env):
@@ -218,6 +182,10 @@ class AgarEnv(gym.Env):
         self.heuristic_bots: Dict[int, HeuristicBot] = {}
         self.total_cells_eaten = 0
         self.episode_pellets_total = 0
+        self._actions_dict: Dict[int, np.ndarray] = {}
+        self._subtick_actions: Dict[int, np.ndarray] = {
+            pid: np.array([0.0, 0.0, -1.0], dtype=np.float32) for pid in range(self.num_bots + 1)
+        }
 
     def action_masks(self, player_id: Optional[int] = None) -> np.ndarray:
         """Flattened MultiDiscrete mask: [num_angles bits | 3 trigger bits].
@@ -253,9 +221,12 @@ class AgarEnv(gym.Env):
 
         # Spawn bot opponents (ids 1 .. num_bots)
         self.heuristic_bots.clear()
+        self._actions_dict.clear()
         for bot_id in range(1, self.num_bots + 1):
             self.engine.spawn_player(bot_id, initial_mass=self.initial_player_mass)
             self.heuristic_bots[bot_id] = HeuristicBot(bot_id, rng=np.random.default_rng(seed))
+            if bot_id not in self._subtick_actions:
+                self._subtick_actions[bot_id] = np.array([0.0, 0.0, -1.0], dtype=np.float32)
 
         self.prev_mass = self.initial_player_mass
         self.peak_mass = self.initial_player_mass
@@ -305,24 +276,29 @@ class AgarEnv(gym.Env):
         pre_max_subcell_mass = max((c.mass for c in pre_learning_cells), default=self.prev_mass)
 
         # Query bot macro-actions ONCE per step for all active bots (3x speedup)
-        actions_dict: Dict[int, np.ndarray] = {self.learning_player_id: engine_action}
+        self._actions_dict[self.learning_player_id] = engine_action
+        learn_sub = self._subtick_actions[self.learning_player_id]
+        learn_sub[0] = engine_action[0]
+        learn_sub[1] = engine_action[1]
+        learn_sub[2] = -1.0
+
         for bot_id in range(1, self.num_bots + 1):
             if not self.engine.get_player_cells(bot_id):
                 self.engine.spawn_player(bot_id, initial_mass=self.initial_player_mass)
             if self.opponent_policy_fn is not None:
                 bot_act = self.opponent_policy_fn(bot_id, self.engine)
+                parsed = self.parse_action(bot_act)
             else:
-                bot_act = self.heuristic_bots[bot_id].get_action(self.engine)
-            actions_dict[bot_id] = self.parse_action(bot_act)
-
-        # Prepare sub-tick actions (reset split trigger on ticks 1+ to prevent multi-split within same macro-step)
-        subtick_actions: Dict[int, np.ndarray] = {}
-        for pid, act in actions_dict.items():
-            subtick_actions[pid] = np.array([act[0], act[1], -1.0], dtype=np.float32)
+                parsed = self.heuristic_bots[bot_id].get_action(self.engine)
+            self._actions_dict[bot_id] = parsed
+            bot_sub = self._subtick_actions[bot_id]
+            bot_sub[0] = parsed[0]
+            bot_sub[1] = parsed[1]
+            bot_sub[2] = -1.0
 
         # Execute physics sub-ticks for action persistence / macro-action
         for tick_idx in range(self.action_repeat):
-            step_actions = actions_dict if tick_idx == 0 else subtick_actions
+            step_actions = self._actions_dict if tick_idx == 0 else self._subtick_actions
             events = self.engine.step(step_actions)
             player_events = events.get(self.learning_player_id, {})
             total_cells_eaten += player_events.get("cells_eaten", 0)

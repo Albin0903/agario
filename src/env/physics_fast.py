@@ -356,6 +356,137 @@ def compute_heuristic_threat_prey(
 
 
 @nb.njit(fastmath=True)
+def compute_bot_action_fast(
+    cx: float,
+    cy: float,
+    cr: float,
+    my_mass: float,
+    num_subcells: int,
+    split_cooldown: int,
+    cells_xy: np.ndarray,
+    cells_mass: np.ndarray,
+    cells_pid: np.ndarray,
+    my_pid: int,
+    viruses_xy: np.ndarray,
+    pellets_xy: np.ndarray,
+    rng_val_split: float,
+    rng_ang: float,
+):
+    """JIT-compiled tactical decision engine for opponent bots.
+
+    Handles threat evasion, virus avoidance, tactical split attacks,
+    prey pursuit, and pellet foraging in compiled C.
+    """
+    view_r = 500.0 + 2.0 * cr
+
+    # 1. Threat & prey computation
+    threat_x = 0.0
+    threat_y = 0.0
+    prey_dx = 0.0
+    prey_dy = 0.0
+    closest_prey_dist = 1e9
+    closest_prey_mass = 0.0
+
+    n = len(cells_xy)
+    for i in range(n):
+        if cells_pid[i] == my_pid:
+            continue
+        dx = cells_xy[i, 0] - cx
+        if abs(dx) > view_r:
+            continue
+        dy = cells_xy[i, 1] - cy
+        if abs(dy) > view_r:
+            continue
+        dist = math.hypot(dx, dy)
+        if dist > view_r or dist < 1e-4:
+            continue
+
+        other_m = cells_mass[i]
+        if other_m >= 1.1 * my_mass:
+            weight = 1.0 / max(30.0, dist)
+            threat_x -= (dx / dist) * weight
+            threat_y -= (dy / dist) * weight
+        elif other_m <= 0.9 * my_mass:
+            if dist < closest_prey_dist:
+                closest_prey_dist = dist
+                closest_prey_mass = other_m
+                prey_dx = dx / dist
+                prey_dy = dy / dist
+
+    # 2. Virus avoidance (mass > 130)
+    virus_avoid_x = 0.0
+    virus_avoid_y = 0.0
+    if my_mass > 130.0 and len(viruses_xy) > 0:
+        thresh = cr + 50.0
+        for v in range(len(viruses_xy)):
+            v_dx = viruses_xy[v, 0] - cx
+            if abs(v_dx) < thresh:
+                v_dy = viruses_xy[v, 1] - cy
+                if abs(v_dy) < thresh:
+                    v_dist = math.hypot(v_dx, v_dy)
+                    if 1e-4 < v_dist < thresh:
+                        w = 1.0 / max(10.0, v_dist)
+                        virus_avoid_x -= (v_dx / v_dist) * w
+                        virus_avoid_y -= (v_dy / v_dist) * w
+
+    threat_norm = math.hypot(threat_x, threat_y)
+    virus_norm = math.hypot(virus_avoid_x, virus_avoid_y)
+
+    # 1. Primary instinct: Flee from predators
+    if threat_norm > 1e-4:
+        return threat_x / threat_norm, threat_y / threat_norm, -1.0, split_cooldown
+
+    # 2. Avoid popping on viruses
+    if virus_norm > 1e-4:
+        return virus_avoid_x / virus_norm, virus_avoid_y / virus_norm, -1.0, split_cooldown
+
+    # 3. Disciplined tactical split
+    can_split = (
+        split_cooldown == 0
+        and threat_norm < 1e-4
+        and num_subcells <= 2
+        and my_mass >= 60.0
+        and 120.0 < closest_prey_dist < 240.0
+        and my_mass >= 2.5 * closest_prey_mass
+        and rng_val_split < 0.08
+    )
+    if can_split:
+        return prey_dx, prey_dy, 0.8, 150
+
+    # 4. Normal prey pursuit
+    if closest_prey_dist < 320.0 and my_mass >= 1.2 * closest_prey_mass:
+        return prey_dx, prey_dy, -1.0, split_cooldown
+
+    # 5. Forage nearest pellet
+    max_pellet_dist = min(view_r, 350.0)
+    max_d_sq = max_pellet_dist * max_pellet_dist
+    best_dist_sq = max_d_sq
+    best_p_dx = 0.0
+    best_p_dy = 0.0
+    found_p = False
+
+    num_pellets = len(pellets_xy)
+    for p in range(num_pellets):
+        pdx = pellets_xy[p, 0] - cx
+        if abs(pdx) < max_pellet_dist:
+            pdy = pellets_xy[p, 1] - cy
+            if abs(pdy) < max_pellet_dist:
+                d_sq = pdx * pdx + pdy * pdy
+                if d_sq < best_dist_sq:
+                    best_dist_sq = d_sq
+                    best_p_dx = pdx
+                    best_p_dy = pdy
+                    found_p = True
+
+    if found_p:
+        dist = math.sqrt(max(1e-8, best_dist_sq))
+        return best_p_dx / dist, best_p_dy / dist, -1.0, split_cooldown
+
+    # 6. Random exploration
+    return math.cos(rng_ang), math.sin(rng_ang), -1.0, split_cooldown
+
+
+@nb.njit(fastmath=True)
 def find_single_nearest_pellet_numba(
     cx: float,
     cy: float,
