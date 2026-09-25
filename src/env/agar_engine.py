@@ -102,6 +102,7 @@ class AgarEngine:
         v_min: float = 0.5,
         radius_scale: float = 3.0,
         max_subcells: int = 16,
+        min_split_mass: float = 36.0,
         remerge_cooldown_ticks: int = 600,
         remerge_cooldown_mass_factor: float = 0.5,
         split_boost_speed: float = 24.0,
@@ -125,6 +126,7 @@ class AgarEngine:
         self.v_min = v_min
         self.radius_scale = radius_scale
         self.max_subcells = max_subcells
+        self.min_split_mass = float(min_split_mass)
         self.remerge_cooldown_ticks = remerge_cooldown_ticks
         self.remerge_cooldown_mass_factor = float(remerge_cooldown_mass_factor)
         self.split_boost_speed = split_boost_speed
@@ -382,7 +384,7 @@ class AgarEngine:
         for cell in p_cells:
             if current_total >= self.max_subcells:
                 break
-            if cell.mass >= 36.0:  # Official Agar.io minimum mass to split (produces two cells >= 18)
+            if cell.mass >= self.min_split_mass:  # Tactical threshold: produces viable offensive pieces (>= 27.5)
                 half_mass = cell.mass / 2.0
                 cell.mass = half_mass
                 cooldown = self._compute_remerge_cooldown(half_mass)

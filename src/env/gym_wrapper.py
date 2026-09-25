@@ -173,7 +173,8 @@ class AgarEnv(gym.Env):
             v_base=self.v_base,
             v_min=float(cfg.get("physics", {}).get("v_min", 0.8)),
             radius_scale=float(cfg.get("physics", {}).get("radius_scale", 3.0)),
-            max_subcells=int(cfg.get("physics", {}).get("max_subcells", 16)),
+            max_subcells=int(cfg.get("physics", {}).get("max_subcells", 4)),
+            min_split_mass=float(cfg.get("physics", {}).get("min_split_mass", 55.0)),
             remerge_cooldown_ticks=int(cfg.get("physics", {}).get("remerge_cooldown_ticks", 600)),
             remerge_cooldown_mass_factor=float(cfg.get("physics", {}).get("remerge_cooldown_mass_factor", 0.5)),
             split_boost_speed=float(cfg.get("physics", {}).get("split_boost_speed", 26.0)),
@@ -315,21 +316,18 @@ class AgarEnv(gym.Env):
         # 3. Moderate death penalty (AgarIA standard, never paralyzing)
         r_death = -min(self.death_penalty_max, self.prev_mass / self.initial_player_mass) if died else 0.0
 
-        # Tactical Split Gating: reward split aimed at prey, penalize blind split spam
+        # Natural Split Strike Bonus: positive reward when splitting towards edible prey in strike zone
+        # Only awarded if split piece (mass / 2) can actually consume the prey! (Agar.io eat_ratio = 1.1)
+        # Zero artificial penalty: exploration is never taxed or paralyzed!
         r_split = 0.0
         if engine_action[2] > 0.6 or total_splits > 0:
-            is_aimed_strike = False
-            if 40.0 < self._last_prey_dist < 320.0:
-                act_angle = math.atan2(float(engine_action[1]), float(engine_action[0]))
-                prey_angle = math.atan2(self._last_prey_dy, self._last_prey_dx)
-                angle_diff = abs((act_angle - prey_angle + math.pi) % (2.0 * math.pi) - math.pi)
-                if angle_diff < (math.pi / 4.0):  # within +/- 45 deg
-                    is_aimed_strike = True
-
-            if is_aimed_strike:
-                r_split = self.split_strike_bonus
-            else:
-                r_split = -self.split_waste_penalty
+            if 40.0 < self._last_prey_dist < 320.0 and self._last_prey_mass > 0:
+                if (self.prev_mass / 2.0) > 1.15 * self._last_prey_mass:
+                    act_angle = math.atan2(float(engine_action[1]), float(engine_action[0]))
+                    prey_angle = math.atan2(self._last_prey_dy, self._last_prey_dx)
+                    angle_diff = abs((act_angle - prey_angle + math.pi) % (2.0 * math.pi) - math.pi)
+                    if angle_diff < (math.pi / 4.0):  # within +/- 45 deg
+                        r_split = self.split_strike_bonus
 
         # Build next observation (also updates self._last_pellet_dist and self._last_prey_dist)
         obs = self._build_observation()
@@ -348,13 +346,16 @@ class AgarEnv(gym.Env):
                 progress = np.clip(dist_delta / max_close, -1.0, 1.0)
                 r_forage = float(progress * self.forage_reward_scale * forage_mod)
 
-        # 5. Dense Potential-Based Reward Shaping (PBRS) for Hunting Preys (AgarCL / GoBigger)
+        # 5. Directional Pursuit Reward (Heading Alignment): rewards pointing towards edible prey
+        # Pure positive gradient for stalking and herding, immune to relative speed differentials
         r_hunt = 0.0
-        if not died and self.prev_prey_dist > 0 and curr_prey_dist > 0:
-            prey_dist_delta = self.prev_prey_dist - curr_prey_dist
-            max_close = max(1.0, float(self.action_repeat) * self.v_max)
-            prey_progress = np.clip(prey_dist_delta / max_close, -1.0, 1.0)
-            r_hunt = float(prey_progress * self.hunt_reward_scale)
+        if not died and self._last_prey_dist > 0:
+            act_norm = math.hypot(float(engine_action[0]), float(engine_action[1]))
+            if act_norm > 1e-4:
+                cos_align = (float(engine_action[0]) * self._last_prey_dx + float(engine_action[1]) * self._last_prey_dy) / (act_norm * self._last_prey_dist)
+                if cos_align > 0.0:
+                    proximity = min(1.0, 350.0 / max(40.0, self._last_prey_dist))
+                    r_hunt = float(cos_align * self.hunt_reward_scale * proximity)
 
         self.prev_pellet_dist = curr_pellet_dist
         self.prev_prey_dist = curr_prey_dist
@@ -429,13 +430,16 @@ class AgarEnv(gym.Env):
             if dist > view_r:
                 continue
 
-            dm = other_cell.mass - my_mass
             v_rel = math.hypot(other_cell.vx - avg_vx, other_cell.vy - avg_vy)
+            # Logarithmic relative mass scale: tanh(ln(m_other / m_self))
+            # Natural thresholds: prey (< -0.1), safe rival (+0.1 to +0.5), lethal split threat (> +0.65)
+            log_ratio = math.log(max(1.0, other_cell.mass) / max(1.0, my_mass))
+            log_ratio_norm = float(np.tanh(log_ratio))
 
             if other_cell.mass <= 0.9 * my_mass:
-                preys.append((dist, dx, dy, dm, v_rel, other_cell.mass))
+                preys.append((dist, dx, dy, log_ratio_norm, v_rel, other_cell.mass))
             elif other_cell.mass >= 1.1 * my_mass:
-                predators.append((dist, dx, dy, dm, v_rel))
+                predators.append((dist, dx, dy, log_ratio_norm, v_rel))
 
         # 3. 5 Prey Cells (20 floats) -> offset 24 to 44
         preys.sort(key=lambda item: item[0])
@@ -451,20 +455,20 @@ class AgarEnv(gym.Env):
                 self._last_prey_dy = 0.0
                 self._last_prey_mass = 0.0
 
-        for i, (dist, dx, dy, dm, v_rel, *_) in enumerate(preys[:5]):
+        for i, (dist, dx, dy, lr_norm, v_rel, *_) in enumerate(preys[:5]):
             base = 24 + i * 4
             obs[base] = float(np.clip(dx / view_r, -1.0, 1.0))
             obs[base + 1] = float(np.clip(dy / view_r, -1.0, 1.0))
-            obs[base + 2] = float(np.tanh(dm / 100.0))
+            obs[base + 2] = lr_norm
             obs[base + 3] = float(np.clip(v_rel / self.v_max, -1.0, 1.0))
 
         # 4. 5 Predator Cells (20 floats) -> offset 44 to 64
         predators.sort(key=lambda item: item[0])
-        for i, (_, dx, dy, dm, v_rel) in enumerate(predators[:5]):
+        for i, (_, dx, dy, lr_norm, v_rel) in enumerate(predators[:5]):
             base = 44 + i * 4
             obs[base] = float(np.clip(dx / view_r, -1.0, 1.0))
             obs[base + 1] = float(np.clip(dy / view_r, -1.0, 1.0))
-            obs[base + 2] = float(np.tanh(dm / 100.0))
+            obs[base + 2] = lr_norm
             obs[base + 3] = float(np.clip(v_rel / self.v_max, -1.0, 1.0))
 
         # 5. 4 nearest Viruses (12 floats) -> offset 64 to 76

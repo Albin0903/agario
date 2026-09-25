@@ -81,36 +81,51 @@ def probe_synthetic_scenarios(model: PPO, env: AgarEnv):
     print(f"   - Preferred Angle: {best_ang_deg:.1f}° (Prob: {a_probs[best_ang_idx]*100:.1f}%)")
     print(f"   - Split Probability: {t_probs[1]*100:.2f}% | Eject: {t_probs[2]*100:.2f}% | Idle: {t_probs[0]*100:.2f}%")
 
-    # 2. Predator Danger: Giant cell at 0 degrees, distance 150
+    # 2. Predator Danger: Giant cell at 0 degrees, distance 150 (Lethal Split Threat)
     obs_pred = np.zeros(84, dtype=np.float32)
     obs_pred[0] = np.tanh(50.0 / 500.0)  # Self mass = 50
-    # Predator 1: dx=150, dy=0, delta_mass=+300 (much bigger)
+    # Predator 1: dx=150, dy=0, mass=350 (7x bigger, lethal split threat)
     obs_pred[44] = 150.0 / 600.0  # dx / R
     obs_pred[45] = 0.0            # dy / R
-    obs_pred[46] = np.tanh(300.0 / 100.0)  # threat level
+    obs_pred[46] = float(np.tanh(math.log(350.0 / 50.0)))  # threat level ~0.96
     obs_pred[47] = 0.0
 
     a_probs, t_probs = get_policy_action_probs(model, obs_pred)
     best_ang_idx = int(np.argmax(a_probs))
     best_ang_deg = best_ang_idx * 15.0
-    print(f"\n🚨 Scenario B: Predator Threat (Huge predator at 0°, 150m ahead)")
+    print(f"\n🚨 Scenario B1: Lethal Predator Threat (Huge predator at 0°, 150m ahead, 7.0x mass)")
     print(f"   - Preferred Angle: {best_ang_deg:.1f}° (Ideal evasion: ~180°)")
     print(f"   - Evasion Alignment: {'✅ Fleeing correctly' if 135 <= best_ang_deg <= 225 else '⚠️ Ineffective evasion'}")
     print(f"   - Split Probability: {t_probs[1]*100:.2f}% (Panic split?) | Idle: {t_probs[0]*100:.2f}%")
 
+    # 2b. Harmless Rival: Cell at 0 degrees, distance 150, mass 60 (1.2x bigger, cannot split-kill)
+    obs_rival = np.zeros(84, dtype=np.float32)
+    obs_rival[0] = np.tanh(50.0 / 500.0)
+    obs_rival[44] = 150.0 / 600.0
+    obs_rival[45] = 0.0
+    obs_rival[46] = float(np.tanh(math.log(60.0 / 50.0)))  # harmless rival ~0.18
+    obs_rival[47] = 0.0
+
+    a_probs_r, t_probs_r = get_policy_action_probs(model, obs_rival)
+    best_ang_idx_r = int(np.argmax(a_probs_r))
+    best_ang_deg_r = best_ang_idx_r * 15.0
+    print(f"\n🛡️ Scenario B2: Harmless Rival (Enemy 1.2x mass at 0°, cannot split-kill)")
+    print(f"   - Preferred Angle: {best_ang_deg_r:.1f}°")
+    print(f"   - Split Probability: {t_probs_r[1]*100:.2f}% ({'✅ Calm (No panic split)' if t_probs_r[1] < 0.10 else '⚠️ Unnecessary panic split'}) | Idle: {t_probs_r[0]*100:.2f}%")
+
     # 3. Prey Opportunity: Smaller bot right in front at 0 degrees, distance 120 (Strike Zone!)
+    # Self mass = 120, Prey mass = 50 -> split half = 60 > 1.15 * 50 = 57.5 (Viable split strike!)
     obs_prey = np.zeros(84, dtype=np.float32)
     obs_prey[0] = np.tanh(120.0 / 500.0)  # Self mass = 120
-    # Prey 1: dx=120, dy=0, delta_mass=-70 (prey is smaller, 50 mass)
     obs_prey[24] = 120.0 / 600.0  # dx / R
     obs_prey[25] = 0.0            # dy / R
-    obs_prey[26] = np.tanh(-70.0 / 100.0)  # edible!
+    obs_prey[26] = float(np.tanh(math.log(50.0 / 120.0)))  # edible prey ~ -0.71
     obs_prey[27] = 0.0
 
     a_probs, t_probs = get_policy_action_probs(model, obs_prey)
     best_ang_idx = int(np.argmax(a_probs))
     best_ang_deg = best_ang_idx * 15.0
-    print(f"\n🎯 Scenario C: Prey Opportunity (Small prey at 0°, distance 120 in strike zone)")
+    print(f"\n🎯 Scenario C: Prey Opportunity (Small prey at 0°, distance 120 in strike zone, split viable)")
     print(f"   - Preferred Angle: {best_ang_deg:.1f}° (Target is 0°)")
     print(f"   - SPLIT ATTACK PROBABILITY: {t_probs[1]*100:.2f}% (Needs to be > 30% for aggressive hunting)")
     print(f"   - Move/Idle Probability:    {t_probs[0]*100:.2f}%")

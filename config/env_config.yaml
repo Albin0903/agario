@@ -13,7 +13,8 @@ physics:
   eat_ratio: 1.1               # m_A >= 1.1 * m_B to consume
   initial_player_mass: 20.0
   min_cell_mass: 10.0
-  max_subcells: 16
+  min_split_mass: 55.0          # Only cells >= 55 mass can split (prevents subcell popcorn suicide)
+  max_subcells: 4               # Compact multi-cell ceiling for fast remerge and high survivability
   remerge_cooldown_ticks: 600
   remerge_cooldown_mass_factor: 0.5
   split_boost_speed: 26.0
@@ -50,9 +51,9 @@ rewards:
   kill_reward: 25.0             # Combat payoff for eliminating opponent (SOTA GoBigger/AgarCL)
   death_penalty_max: 10.0       # Terminal penalty on being eaten
   forage_reward_scale: 0.04     # Dense PBRS gradient towards closest pellet (damped for large cells)
-  hunt_reward_scale: 0.08       # Dense PBRS progress towards closest edible prey
-  split_strike_bonus: 0.5       # Encouragement for splitting towards prey in forward cone
-  split_waste_penalty: 0.25     # Penalty for splitting into empty space with no targets
+  hunt_reward_scale: 0.08       # Directional pursuit alignment reward (heading cosine toward prey)
+  split_strike_bonus: 0.5       # Natural bonus when splitting towards prey in forward cone
+  split_waste_penalty: 0.0      # Zero artificial toll penalty (prevents policy paralysis)
 
 simulation:
   max_steps: 3500               # Match length in ticks
