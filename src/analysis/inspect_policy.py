@@ -165,6 +165,8 @@ def probe_live_simulation(model: PPO, env: AgarEnv, num_steps: int = 1500):
     angle_counts = np.zeros(24, dtype=int)
     trigger_counts = np.zeros(3, dtype=int)
 
+    import time
+    t0 = time.perf_counter()
     for step in range(num_steps):
         action, _ = model.predict(obs, deterministic=False)
         angle_idx = int(action[0])
@@ -198,11 +200,15 @@ def probe_live_simulation(model: PPO, env: AgarEnv, num_steps: int = 1500):
         if terminated or truncated:
             obs, info = env.reset()
 
+    elapsed = time.perf_counter() - t0
+    eval_fps = num_steps / max(1e-6, elapsed)
+    ms_step = (elapsed / max(1, num_steps)) * 1000.0
+
     total_trig = max(1, int(np.sum(trigger_counts)))
     print(f"📊 Match Statistics over {num_steps} steps:")
     print(f"   - Peak Mass Reached:       {peak_mass:.1f}")
-    print(f"   - Pellets Eaten:           {pellets_eaten_total}")
-    print(f"   - Opponent Cells Consumed: {cells_eaten_total} (Kills)")
+    print(f"   - Pellets Eaten:           {pellets_eaten_total} ({pellets_eaten_total/num_steps*1000:.0f}/1k steps)")
+    print(f"   - Opponent Cells Consumed: {cells_eaten_total} (Kills: {cells_eaten_total/num_steps*1000:.2f}/1k steps)")
     print(f"   - Total Splits Fired:      {splits_count}")
     print(f"     • Splits aimed at prey:  {splits_on_prey} ({(splits_on_prey/max(1, splits_count))*100:.1f}%)")
     print(f"     • Splits in empty space: {splits_on_empty} ({(splits_on_empty/max(1, splits_count))*100:.1f}%)")
@@ -218,6 +224,25 @@ def probe_live_simulation(model: PPO, env: AgarEnv, num_steps: int = 1500):
     entropy = -np.sum(p_ang_nz * np.log2(p_ang_nz))
     max_entropy = math.log2(24)
     print(f"   - Angle Exploration Entropy: {entropy:.2f} / {max_entropy:.2f} bits ({(entropy/max_entropy)*100:.1f}%)")
+
+    # Engine Speed & Latency Metrics
+    print("\n" + "=" * 70)
+    print("⚡ [PROBE 3] ENGINE PERFORMANCE & INFERENCE METRICS")
+    print("=" * 70)
+    # Benchmark raw engine speed without neural network
+    env.reset(seed=999)
+    raw_action = np.array([0, 0])
+    t_raw_0 = time.perf_counter()
+    raw_bench_steps = 1000
+    for _ in range(raw_bench_steps):
+        env.step(raw_action)
+    t_raw_elapsed = time.perf_counter() - t_raw_0
+    raw_fps = raw_bench_steps / max(1e-6, t_raw_elapsed)
+    raw_ms = (t_raw_elapsed / raw_bench_steps) * 1000.0
+
+    print(f"   - Raw Physics Simulation:    {raw_fps:,.0f} SPS ({raw_ms:.3f} ms/step)")
+    print(f"   - End-to-End RL Inference:   {eval_fps:,.0f} SPS ({ms_step:.3f} ms/step)")
+    print(f"   - Real-Time Acceleration:    ~{eval_fps/30.0:.1f}x real-time (at 30 FPS tick rate)")
 
 
 def main():
