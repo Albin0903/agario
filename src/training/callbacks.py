@@ -91,6 +91,9 @@ class SelfPlayCallback(BaseCallback):
                 self.logger.record("agar/cells_eaten", avg_eaten)
                 self.logger.record("agar/pellets_eaten", avg_pellets)
                 self.logger.record("agar/self_play_pool_size", len(self.pool))
+                if hasattr(self.model, "lr_schedule"):
+                    progress = getattr(self.model, "_current_progress_remaining", 1.0)
+                    self.logger.record("agar/learning_rate", float(self.model.lr_schedule(progress)))
 
             if self.verbose > 0:
                 print(

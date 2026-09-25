@@ -3,6 +3,8 @@
 
 ppo:
   learning_rate: 0.0003
+  learning_rate_end: 0.00001    # Cosine annealing floor (3e-4 -> 1e-5)
+  lr_schedule: cosine
   n_steps: 2048                 # Horizon per worker = 2048 (Guide Section 6)
   batch_size: 1024              # Maximize L4 tensor core utilization
   n_epochs: 8                   # Epochs per rollout
@@ -17,6 +19,8 @@ ppo:
   total_timesteps: 15000000     # 15M timesteps (~30-40 min on GPU L4 @ 6000-8000 FPS)
 
 policy:
+  features_dim: 512             # LayerNorm/RMSNorm trunk width
+  norm: layernorm               # layernorm | rmsnorm
   net_arch:
     pi: [512, 512, 512]         # Deep 3x512 representation for spatial reasoning
     vf: [512, 512, 512]

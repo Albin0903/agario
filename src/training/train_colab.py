@@ -34,13 +34,20 @@ from typing import Callable, Optional, Dict, Any
 import numpy as np
 import torch
 
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
 from stable_baselines3.common.vec_env import SubprocVecEnv, DummyVecEnv, VecMonitor, VecNormalize
 from stable_baselines3.common.utils import set_random_seed
 
 from src.env.gym_wrapper import AgarEnv
 from src.training.self_play_pool import SelfPlayPool
 from src.training.callbacks import SelfPlayCallback
+from src.training.policy_arch import (
+    LayerNormMaskablePolicy,
+    build_lr_schedule,
+    build_policy_kwargs,
+    load_trained_model,
+    wrap_action_masker,
+)
 
 
 def make_env_fn(
@@ -81,7 +88,8 @@ def make_env_fn(
                         return bot_cached_actions[bot_id]
 
                     obs = dummy_env._build_observation(player_id=bot_id)
-                    action = pool.get_action(opp, obs)
+                    masks = dummy_env.action_masks(player_id=bot_id)
+                    action = pool.get_action(opp, obs, action_masks=masks)
                     bot_cached_actions[bot_id] = action
                     return action
 
@@ -94,6 +102,8 @@ def make_env_fn(
 
         env = AgarEnv(config=env_config, opponent_policy_fn=opponent_controller, seed=seed + rank)
         _init._cached_env = env
+        if env.action_type == "multidiscrete":
+            env = wrap_action_masker(env)
         return env
 
     return _init
@@ -289,14 +299,17 @@ def main():
         vec_env = VecNormalize(vec_env, norm_obs=False, norm_reward=True, clip_reward=10.0, gamma=gamma)
     gae_lambda = float(ppo_cfg.get("ppo", {}).get("gae_lambda", args.gae_lambda))
     ent_coef = float(ppo_cfg.get("ppo", {}).get("ent_coef", args.ent_coef))
-    lr = float(ppo_cfg.get("ppo", {}).get("learning_rate", args.learning_rate))
-
-    # PPO Policy Architecture: 2x512 MLP (Guide Section 6)
-    cfg_net_arch = ppo_cfg.get("policy", {}).get("net_arch", dict(pi=[512, 512], vf=[512, 512]))
-    policy_kwargs = {
-        "net_arch": cfg_net_arch,
-        "activation_fn": torch.nn.ReLU,
-    }
+    n_steps = int(ppo_cfg.get("ppo", {}).get("n_steps", args.n_steps))
+    batch_size = int(ppo_cfg.get("ppo", {}).get("batch_size", args.batch_size))
+    n_epochs = int(ppo_cfg.get("ppo", {}).get("n_epochs", 8))
+    lr_start = float(ppo_cfg.get("ppo", {}).get("learning_rate", args.learning_rate))
+    lr_end = float(ppo_cfg.get("ppo", {}).get("learning_rate_end", 1e-5))
+    lr = build_lr_schedule(ppo_cfg, lr_start)
+    policy_kwargs = build_policy_kwargs(ppo_cfg)
+    print(
+        f"  V10: MaskablePPO + {ppo_cfg.get('policy', {}).get('norm', 'layernorm')}(512) "
+        f"+ cosine LR {lr_start:.1e} → {lr_end:.1e}"
+    )
 
     # Check tensorboard availability
     try:
@@ -307,15 +320,26 @@ def main():
 
     is_resumed = False
     if resume_path and os.path.exists(resume_path):
-        print(f"\n🔄 Resuming PPO model from checkpoint: {resume_path}")
-        model = PPO.load(
-            resume_path,
-            env=vec_env,
-            device=device,
-            tensorboard_log=tb_log,
-        )
-        is_resumed = True
-    else:
+        print(f"\n🔄 Resuming MaskablePPO model from checkpoint: {resume_path}")
+        try:
+            model = load_trained_model(
+                resume_path,
+                env=vec_env,
+                device=device,
+                tensorboard_log=tb_log,
+                learning_rate=lr,
+            )
+            if not isinstance(model, MaskablePPO):
+                raise TypeError("checkpoint is vanilla PPO, not MaskablePPO")
+            is_resumed = True
+        except Exception as e:
+            print(
+                f"⚠️ V10 cannot resume '{resume_path}' ({e}). "
+                "Architecture changed (MaskablePPO + LayerNorm). Starting a fresh V10 run. "
+                "Use --fresh to skip this warning."
+            )
+            resume_path = None
+    if not is_resumed:
         # Check if warm-start BC model is requested or available
         bc_path = os.path.join(args.save_dir, "ppo_bc_pretrained.zip")
         if args.backup_dir and os.path.exists(os.path.join(args.backup_dir, "ppo_bc_pretrained.zip")):
@@ -343,26 +367,32 @@ def main():
                     pass
 
         if os.path.exists(bc_path):
-            print(f"\n🚀 Initializing PPO from warm-started BC policy: {bc_path}")
-            model = PPO.load(
-                bc_path,
-                env=vec_env,
-                device=device,
-                tensorboard_log=tb_log,
-                learning_rate=lr,
-                n_steps=n_steps,
-                batch_size=batch_size,
-                n_epochs=n_epochs,
-                gamma=gamma,
-                gae_lambda=gae_lambda,
-                ent_coef=ent_coef,
-                vf_coef=0.5,
-                max_grad_norm=0.5,
-            )
+            print(f"\n🚀 Initializing MaskablePPO from warm-started BC policy: {bc_path}")
+            try:
+                model = load_trained_model(
+                    bc_path,
+                    env=vec_env,
+                    device=device,
+                    tensorboard_log=tb_log,
+                    learning_rate=lr,
+                    n_steps=n_steps,
+                    batch_size=batch_size,
+                    n_epochs=n_epochs,
+                    gamma=gamma,
+                    gae_lambda=gae_lambda,
+                    ent_coef=ent_coef,
+                    vf_coef=0.5,
+                    max_grad_norm=0.5,
+                )
+            except Exception as e:
+                print(f"⚠️ BC checkpoint incompatible with V10 ({e}). Training from scratch.")
+                model = None
         else:
-            print("\n🚀 Starting fresh PPO training from scratch (V3 MultiDiscrete SOTA architecture).")
-            model = PPO(
-                policy="MlpPolicy",
+            model = None
+        if model is None:
+            print("\n🚀 Starting fresh MaskablePPO training (V10 LayerNorm + action masking).")
+            model = MaskablePPO(
+                policy=LayerNormMaskablePolicy,
                 env=vec_env,
                 learning_rate=lr,
                 n_steps=n_steps,
@@ -390,7 +420,7 @@ def main():
         verbose=1,
     )
 
-    print(f"\nStarting PPO optimization loop for {args.total_timesteps:,} timesteps...")
+    print(f"\nStarting MaskablePPO optimization loop for {args.total_timesteps:,} timesteps...")
     try:
         model.learn(
             total_timesteps=args.total_timesteps,

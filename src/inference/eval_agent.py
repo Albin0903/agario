@@ -29,6 +29,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 import yaml
 from src.env.gym_wrapper import AgarEnv, HeuristicBot
+from src.training.policy_arch import load_trained_model, predict_action
 
 
 def load_policy(model_path: Optional[str], env: AgarEnv):
@@ -40,10 +41,11 @@ def load_policy(model_path: Optional[str], env: AgarEnv):
 
     if model_path.endswith(".zip"):
         try:
-            from stable_baselines3 import PPO
             print(f"[eval_agent] Chargement du modèle PyTorch Stable-Baselines3 : {model_path}")
-            sb3_model = PPO.load(model_path, device="cpu")
-            return lambda obs: sb3_model.predict(obs, deterministic=True)[0]
+            sb3_model = load_trained_model(model_path, device="cpu")
+            return lambda obs: predict_action(
+                sb3_model, obs, action_masks=env.action_masks(), deterministic=True
+            )
         except Exception as e:
             print(f"[eval_agent] Erreur chargement SB3 : {e}")
 

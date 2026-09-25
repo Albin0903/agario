@@ -215,6 +215,24 @@ class AgarEnv(gym.Env):
         self.total_cells_eaten = 0
         self.episode_pellets_total = 0
 
+    def action_masks(self, player_id: Optional[int] = None) -> np.ndarray:
+        """Flattened MultiDiscrete mask: [num_angles bits | 3 trigger bits].
+
+        Split (trigger index 1) is False when no cell has mass >= min_split_mass
+        or the player already has max_subcells. Angles and eject stay legal.
+        """
+        n_angles = self.num_angles
+        mask = np.ones(n_angles + 3, dtype=np.bool_)
+        if self.action_type != "multidiscrete":
+            return mask
+        pid = self.learning_player_id if player_id is None else player_id
+        cells = self.engine.get_player_cells(pid)
+        can_split = bool(cells) and len(cells) < self.max_subcells and any(
+            cell.mass >= self.min_split_mass for cell in cells
+        )
+        mask[n_angles + 1] = can_split
+        return mask
+
     def reset(
         self,
         seed: Optional[int] = None,

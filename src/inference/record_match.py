@@ -183,10 +183,15 @@ class MatchRecorder:
 
         if model_path.endswith(".zip"):
             try:
-                from stable_baselines3 import PPO
+                from src.training.policy_arch import load_trained_model, predict_action
                 print(f"[MatchRecorder] Loading Stable-Baselines3 model from: {model_path} (deterministic={self.deterministic})")
-                sb3_model = PPO.load(model_path, device="cpu")
-                return lambda obs: sb3_model.predict(obs, deterministic=self.deterministic)[0]
+                sb3_model = load_trained_model(model_path, device="cpu")
+                return lambda obs: predict_action(
+                    sb3_model,
+                    obs,
+                    action_masks=self.env.action_masks(),
+                    deterministic=self.deterministic,
+                )
             except Exception as e:
                 print(f"[MatchRecorder] Error loading SB3 model: {e}")
 

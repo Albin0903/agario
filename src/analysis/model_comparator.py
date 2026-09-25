@@ -27,8 +27,8 @@ ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
-from stable_baselines3 import PPO
 from src.env.gym_wrapper import AgarEnv
+from src.training.policy_arch import load_trained_model, predict_action
 
 
 def extract_step(path: str) -> int:
@@ -69,7 +69,7 @@ def evaluate_single_checkpoint(
     tag = os.path.basename(model_path).replace(".zip", "")
 
     env = AgarEnv(seed=seed)
-    model = PPO.load(model_path, device="cpu")
+    model = load_trained_model(model_path, device="cpu")
 
     obs, info = env.reset(seed=seed)
 
@@ -88,7 +88,7 @@ def evaluate_single_checkpoint(
 
     t0 = time.perf_counter()
     for _ in range(eval_steps):
-        action, _ = model.predict(obs, deterministic=False)
+        action = predict_action(model, obs, action_masks=env.action_masks(), deterministic=False)
         trig = int(action[1])
         trigger_counts[trig] += 1
 

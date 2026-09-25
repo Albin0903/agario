@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import List, Optional, Tuple, Dict, Any
 import numpy as np
 import torch
-from stable_baselines3 import PPO
+from src.training.policy_arch import load_trained_model, predict_action
 
 
 @dataclass
@@ -49,7 +49,7 @@ class SelfPlayPool:
 
         # Load policy on specified device with no grad
         try:
-            model = PPO.load(checkpoint_path, device=self.device)
+            model = load_trained_model(checkpoint_path, device=self.device)
             policy = model.policy
             policy.eval()
             for p in policy.parameters():
@@ -97,7 +97,12 @@ class SelfPlayPool:
         # 40% Historical sample across earlier pool generations
         return random.choice(self.pool)
 
-    def get_action(self, opponent: Optional[OpponentEntry], obs: np.ndarray) -> np.ndarray:
+    def get_action(
+        self,
+        opponent: Optional[OpponentEntry],
+        obs: np.ndarray,
+        action_masks: Optional[np.ndarray] = None,
+    ) -> np.ndarray:
         """Query action from opponent model, or fallback to random/zeros."""
         if opponent is None or opponent.policy is None:
             ang = random.uniform(0, 2 * np.pi)
@@ -105,8 +110,7 @@ class SelfPlayPool:
 
         try:
             with torch.no_grad():
-                action, _ = opponent.policy.predict(obs, deterministic=False)
-                return action
+                return predict_action(opponent.policy, obs, action_masks=action_masks, deterministic=False)
         except Exception:
             ang = random.uniform(0, 2 * np.pi)
             return np.array([np.cos(ang), np.sin(ang), -1.0], dtype=np.float32)

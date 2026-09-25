@@ -11,7 +11,7 @@ import os
 import sys
 import math
 import argparse
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Optional, Tuple
 import numpy as np
 import yaml
 import torch
@@ -28,8 +28,9 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
 from src.env.gym_wrapper import AgarEnv, HeuristicBot
+from src.training.policy_arch import LayerNormMaskablePolicy, build_policy_kwargs, wrap_action_masker
 
 
 def load_yaml(path: str) -> Dict[str, Any]:
@@ -120,15 +121,11 @@ def pretrain_policy(
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
     # Instantiate SB3 PPO model matching training configuration
-    dummy_env = AgarEnv(config=env_cfg, seed=seed)
-    cfg_net_arch = ppo_cfg.get("policy", {}).get("net_arch", dict(pi=[512, 512, 512], vf=[512, 512, 512]))
-    policy_kwargs = {
-        "net_arch": cfg_net_arch,
-        "activation_fn": torch.nn.ReLU,
-    }
+    dummy_env = wrap_action_masker(AgarEnv(config=env_cfg, seed=seed))
+    policy_kwargs = build_policy_kwargs(ppo_cfg)
 
-    model = PPO(
-        policy="MlpPolicy",
+    model = MaskablePPO(
+        policy=LayerNormMaskablePolicy,
         env=dummy_env,
         policy_kwargs=policy_kwargs,
         device=dev,

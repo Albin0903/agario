@@ -32,8 +32,8 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from stable_baselines3 import PPO
 from src.env.gym_wrapper import AgarEnv, mass_to_radius
+from src.training.policy_arch import load_trained_model, predict_action
 
 
 def load_yaml(path: str) -> Dict[str, Any]:
@@ -43,7 +43,7 @@ def load_yaml(path: str) -> Dict[str, Any]:
     return {}
 
 
-def get_policy_action_probs(model: PPO, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+def get_policy_action_probs(model, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     """Query actor head to extract probability distributions for angles (24) and triggers (3)."""
     with torch.no_grad():
         obs_tensor = torch.as_tensor(obs, device=model.device).float().unsqueeze(0)
@@ -61,7 +61,7 @@ def get_policy_action_probs(model: PPO, obs: np.ndarray) -> Tuple[np.ndarray, np
     return angle_probs, trig_probs
 
 
-def probe_synthetic_scenarios(model: PPO, env: AgarEnv):
+def probe_synthetic_scenarios(model, env: AgarEnv):
     """Evaluate policy logits on targeted synthetic game states."""
     print("\n" + "=" * 70)
     print("🔬 [PROBE 1] SYNTHETIC TACTICAL BEHAVIOR TESTS")
@@ -148,7 +148,7 @@ def probe_synthetic_scenarios(model: PPO, env: AgarEnv):
         print("   ⚠️ DIAGNOSIS: Policy tends to over-split even when already fragmented!")
 
 
-def probe_live_simulation(model: PPO, env: AgarEnv, num_steps: int = 1500):
+def probe_live_simulation(model, env: AgarEnv, num_steps: int = 1500):
     """Run an evaluation episode and log combat and movement telemetry."""
     print("\n" + "=" * 70)
     print(f"🎮 [PROBE 2] LIVE MATCH TELEMETRY ({num_steps} STEPS)")
@@ -168,7 +168,7 @@ def probe_live_simulation(model: PPO, env: AgarEnv, num_steps: int = 1500):
     import time
     t0 = time.perf_counter()
     for step in range(num_steps):
-        action, _ = model.predict(obs, deterministic=False)
+        action = predict_action(model, obs, action_masks=env.action_masks(), deterministic=False)
         angle_idx = int(action[0])
         trig_idx = int(action[1])
 
@@ -278,7 +278,7 @@ def main():
     env_cfg = load_yaml(args.env_config)
     env = AgarEnv(config=env_cfg, seed=42)
 
-    model = PPO.load(model_path, device="cpu")
+    model = load_trained_model(model_path, device="cpu")
 
     probe_synthetic_scenarios(model, env)
     probe_live_simulation(model, env, num_steps=args.steps)

@@ -4,18 +4,19 @@ from __future__ import annotations
 import os
 import sys
 import time
-import argparse
 import math
+from typing import Optional
 import numpy as np
 import torch
 import onnx
 import onnxruntime as ort
-from stable_baselines3 import PPO
 
 # Ensure repository root is in python path
 ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
 if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
+
+from src.training.policy_arch import load_trained_model
 
 
 class OnnxPolicyWrapper(torch.nn.Module):
@@ -64,7 +65,7 @@ def export_to_onnx(
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
     print(f"[ONNX Export] Loading PyTorch model from: {model_path}")
-    model = PPO.load(model_path, device=device)
+    model = load_trained_model(model_path, device=device)
     policy = model.policy
     policy.eval()
 
