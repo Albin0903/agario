@@ -24,7 +24,7 @@ physics:
   eject_spawn_mass: 12.0
   eject_speed: 18.0
   min_decay_mass: 100.0
-  mass_decay_rate: 0.00008
+  mass_decay_rate: 0.002            # 0.2% of current mass per simulated second, above 100 mass
 
 entities:
   num_pellets: 2000             # Dense food field for constant growth
@@ -54,6 +54,7 @@ rewards:
 
 simulation:
   max_steps: 3500               # Match length in ticks
+  tick_duration_seconds: 0.04   # 25 physics ticks per simulated second
   action_repeat: 3              # 3 physics ticks per RL decision step (macro-actions)
   num_bots: 20                  # SOTA dense multi-agent arena
   spatial_grid_cell_size: 100.0 # Fast spatial hashing

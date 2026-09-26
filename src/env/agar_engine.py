@@ -115,6 +115,7 @@ class AgarEngine:
         eject_loss_mass: float = 16.0,
         eject_spawn_mass: float = 12.0,
         mass_decay_rate: float = 0.0,
+        tick_duration_seconds: float = 1.0 / 25.0,
         spatial_cell_size: float = 100.0,
         seed: Optional[int] = None,
     ):
@@ -139,7 +140,12 @@ class AgarEngine:
         self.split_boost_decay = split_boost_decay
         self.eject_loss_mass = eject_loss_mass
         self.eject_spawn_mass = eject_spawn_mass
+        if not 0.0 <= mass_decay_rate < 1.0:
+            raise ValueError("mass_decay_rate must be in [0, 1) per simulated second")
         self.mass_decay_rate = mass_decay_rate
+        if tick_duration_seconds <= 0.0:
+            raise ValueError("tick_duration_seconds must be positive")
+        self.tick_duration_seconds = float(tick_duration_seconds)
 
         self.rng = np.random.default_rng(seed)
         self.spatial_grid = SpatialHashGrid(self.width, self.height, cell_size=spatial_cell_size)
@@ -664,7 +670,9 @@ class AgarEngine:
         has_split_players = len(self.cells) > len(self._player_cells_cache)
         v_base = self.v_base
         v_min = self.v_min
-        mass_decay = self.mass_decay_rate
+        # Convert the per-second loss rate to an equivalent per-tick fraction;
+        # physics therefore stays consistent regardless of training throughput.
+        mass_decay = 1.0 - (1.0 - self.mass_decay_rate) ** self.tick_duration_seconds
         boost_decay = self.split_boost_decay
         w = self.width
         h = self.height
@@ -691,8 +699,7 @@ class AgarEngine:
                 cell.vy = 0.0
 
             if mass_decay > 0.0 and cell.mass > 100.0:
-                scale_factor = 1.0 + (cell.mass - 100.0) / 800.0
-                decay = cell.mass * mass_decay * scale_factor
+                decay = cell.mass * mass_decay
                 cell.mass = max(100.0, cell.mass - decay)
 
         if profiling:

@@ -122,7 +122,7 @@ def test_split_action():
 
 def test_eject_mass_action():
     """Verify mass ejection deducts 16 mass and spawns 12 mass pellet."""
-    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0)
+    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0)
     cell = engine.spawn_player(0, initial_mass=100.0, xy=(500.0, 500.0))
 
     # Trigger eject mass towards right (trigger = 0.4 is in 0.2 < trig <= 0.6)
@@ -290,15 +290,23 @@ def test_mass_dependent_remerge_cooldown():
     assert p1_cells[0].remerge_cooldown > p0_cells[0].remerge_cooldown
 
 
-def test_mass_decay_threshold_and_gentle_rate():
-    """Verify cells <= 100 mass do not decay, and cells > 100 decay gently."""
-    engine = AgarEngine(width=1000.0, height=1000.0, num_pellets=0, num_viruses=0, mass_decay_rate=0.001)
+def test_mass_decay_is_0_2_percent_per_simulated_second_above_threshold():
+    """Verify decay uses a time-based 0.2% per second rate above 100 mass."""
+    tick_seconds = 1.0 / 25.0
+    engine = AgarEngine(
+        width=1000.0,
+        height=1000.0,
+        num_pellets=0,
+        num_viruses=0,
+        mass_decay_rate=0.002,
+        tick_duration_seconds=tick_seconds,
+    )
     # Small cell (50 mass <= 100)
     c_small = engine.spawn_player(0, initial_mass=50.0, xy=(300.0, 500.0))
     # Large cell (500 mass > 100)
     c_large = engine.spawn_player(1, initial_mass=500.0, xy=(700.0, 500.0))
 
-    for _ in range(50):
+    for _ in range(25):
         engine.step({
             0: np.array([0.0, 0.0, -1.0], dtype=np.float32),
             1: np.array([0.0, 0.0, -1.0], dtype=np.float32),
@@ -306,9 +314,8 @@ def test_mass_decay_threshold_and_gentle_rate():
 
     # Small cell must remain exactly at 50 mass (no decay below 100)
     assert c_small.mass == 50.0
-    # Large cell should have decayed slightly
-    assert c_large.mass < 500.0
-    assert c_large.mass > 450.0  # Gentle decay, not wiped out
+    # One simulated second at 0.2%/s compounds to exactly 500 * 0.998.
+    assert c_large.mass == pytest.approx(500.0 * 0.998, rel=1e-6)
 
 
 def test_non_instant_remerge_penetration():

@@ -2,8 +2,7 @@
 
 SOTA V3 Architecture:
 - Multi-Action Support: MultiDiscrete([24, 3]) or continuous Box(3).
-- Pure SOTA Minimalist Reward (AgarCL / AgarIA standard):
-    R_t = Delta_Mass / M_0 + 10.0 * Kills - min(5.0, M_death / M_0) * Death
+- V10 mass objective: signed mass delta + new-peak bonus + bounded death penalty.
 - Zero artificial wall/danger/jerk micro-penalties (prevents policy paralysis).
 - Fully vectorized Farama Gymnasium compliance.
 """
@@ -153,7 +152,8 @@ class AgarEnv(gym.Env):
             split_boost_decay=float(cfg.get("physics", {}).get("split_boost_decay", 0.90)),
             eject_loss_mass=float(cfg.get("physics", {}).get("eject_loss_mass", 16.0)),
             eject_spawn_mass=float(cfg.get("physics", {}).get("eject_spawn_mass", 12.0)),
-            mass_decay_rate=float(cfg.get("physics", {}).get("mass_decay_rate", 0.00008)),
+            mass_decay_rate=float(cfg.get("physics", {}).get("mass_decay_rate", 0.002)),
+            tick_duration_seconds=float(sim_cfg.get("tick_duration_seconds", 1.0 / 25.0)),
             spatial_cell_size=float(sim_cfg.get("spatial_grid_cell_size", 100.0)),
             seed=seed,
         )
