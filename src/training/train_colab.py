@@ -45,6 +45,7 @@ from src.training.policy_arch import (
     LayerNormMaskablePolicy,
     build_lr_schedule,
     build_policy_kwargs,
+    checkpoint_num_timesteps,
     load_trained_model,
 )
 
@@ -189,18 +190,11 @@ def main():
     import shutil, glob, re
 
     def extract_step(path: str) -> int:
+        saved_step = checkpoint_num_timesteps(path)
+        if saved_step is not None:
+            return saved_step
         m = re.search(r"step_(\d+)", path)
-        if m:
-            return int(m.group(1))
-        manifest = os.path.join(os.path.dirname(path), "v10_manifest.json")
-        if os.path.basename(path) in ("ppo_last.zip", "ppo_latest.zip", "ppo_final.zip") and os.path.exists(manifest):
-            try:
-                import json
-                with open(manifest, encoding="utf-8") as handle:
-                    return int(json.load(handle).get("timesteps", 0))
-            except (OSError, ValueError, TypeError):
-                pass
-        return 0
+        return int(m.group(1)) if m else 0
 
     resume_path = None
     teacher_path = None

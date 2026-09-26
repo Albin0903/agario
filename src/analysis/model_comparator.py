@@ -19,7 +19,6 @@ import glob
 import re
 import math
 import argparse
-import json
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import matplotlib.pyplot as plt
@@ -29,24 +28,17 @@ if ROOT_DIR not in sys.path:
     sys.path.insert(0, ROOT_DIR)
 
 from src.env.gym_wrapper import AgarEnv
-from src.training.policy_arch import load_trained_model, predict_action
+from src.training.policy_arch import checkpoint_num_timesteps, load_trained_model, predict_action
 
 
 def extract_step(path: str) -> int:
     """Extract step integer from checkpoint filename."""
     fname = os.path.basename(path)
+    saved_step = checkpoint_num_timesteps(path)
+    if saved_step is not None:
+        return saved_step
     m = re.search(r"step_(\d+)", fname)
-    if m:
-        return int(m.group(1))
-    if fname in ("ppo_final.zip", "ppo_latest.zip", "ppo_last.zip"):
-        manifest = os.path.join(os.path.dirname(path), "v10_manifest.json")
-        if os.path.exists(manifest):
-            try:
-                with open(manifest, encoding="utf-8") as handle:
-                    return int(json.load(handle).get("timesteps", 0))
-            except (OSError, ValueError, TypeError):
-                pass
-    return 0
+    return int(m.group(1)) if m else 0
 
 
 def benchmark_engine_speed(env: AgarEnv, num_steps: int = 1500) -> Dict[str, float]:

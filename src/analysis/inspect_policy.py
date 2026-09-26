@@ -18,7 +18,6 @@ import sys
 import math
 import argparse
 import glob
-import json
 import re
 from typing import Dict, Any, List, Tuple
 import numpy as np
@@ -37,7 +36,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 from src.env.gym_wrapper import AgarEnv
 from src.env.entities import mass_to_radius
-from src.training.policy_arch import load_trained_model, predict_action
+from src.training.policy_arch import checkpoint_num_timesteps, load_trained_model, predict_action
 
 
 def load_yaml(path: str) -> Dict[str, Any]:
@@ -315,16 +314,12 @@ def _resolve_model_path(cli_value: str | None) -> str | None:
     ]
     def candidate_key(path: str) -> tuple[int, int]:
         name = os.path.basename(path)
+        saved_step = checkpoint_num_timesteps(path)
+        if saved_step is not None:
+            return (saved_step, 1)
         match = re.search(r"step_(\d+)", name)
         if match:
             return (int(match.group(1)), 1)
-        manifest_path = os.path.join(os.path.dirname(path), "v10_manifest.json")
-        if name in ("ppo_latest.zip", "ppo_last.zip", "ppo_final.zip") and os.path.exists(manifest_path):
-            try:
-                with open(manifest_path, encoding="utf-8") as handle:
-                    return (int(json.load(handle).get("timesteps", 0)), 1)
-            except (OSError, ValueError, TypeError):
-                pass
         return (0, 0)
     def version_rank(path: str) -> int:
         match = re.search(r"backup_v(\d+)", path)

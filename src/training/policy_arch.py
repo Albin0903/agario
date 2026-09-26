@@ -7,6 +7,8 @@ by masking the split logit to -inf instead of waiting for the agent to learn it.
 from __future__ import annotations
 
 import math
+import re
+import zipfile
 from typing import Any, Callable, Dict, Optional, Type, Union
 
 import numpy as np
@@ -210,6 +212,17 @@ def _v10_custom_objects() -> Dict[str, Any]:
     except Exception:
         pass
     return objects
+
+
+def checkpoint_num_timesteps(path: str) -> Optional[int]:
+    """Read SB3's saved timestep counter from a model archive without loading weights."""
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            data = archive.read("data").decode("utf-8", errors="replace")
+        match = re.search(r'"num_timesteps"\s*:\s*(\d+)', data)
+        return int(match.group(1)) if match else None
+    except (OSError, KeyError, zipfile.BadZipFile):
+        return None
 
 
 def load_trained_model(path: str, allow_legacy: bool = True, **kwargs):
