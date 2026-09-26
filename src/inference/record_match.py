@@ -29,6 +29,7 @@ if hasattr(sys.stdout, "reconfigure"):
 
 # Set headless SDL video driver for offscreen rendering
 os.environ["SDL_VIDEODRIVER"] = "dummy"
+os.environ["SDL_AUDIODRIVER"] = "dummy"
 
 import pygame
 import yaml
@@ -176,10 +177,12 @@ class MatchRecorder:
 
     def _load_policy(self, model_path: Optional[str]):
         """Load PPO or ONNX policy, or fallback to Heuristic."""
-        if not model_path or not os.path.exists(model_path):
-            print(f"[MatchRecorder] No model found at '{model_path}'. Using Heuristic policy.")
+        if not model_path:
+            print("[MatchRecorder] No model specified. Using Heuristic policy.")
             bot = HeuristicBot(self.ai_player_id)
             return lambda obs: bot.get_action(self.engine)
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Requested replay model does not exist: '{model_path}'")
 
         if model_path.endswith(".zip"):
             try:
@@ -193,7 +196,10 @@ class MatchRecorder:
                     deterministic=self.deterministic,
                 )
             except Exception as e:
-                print(f"[MatchRecorder] Error loading SB3 model: {e}")
+                raise RuntimeError(
+                    f"Failed to load the requested Stable-Baselines3 model '{model_path}'. "
+                    "Replay cancelled instead of silently substituting the heuristic policy."
+                ) from e
 
         if model_path.endswith(".onnx"):
             try:
@@ -205,10 +211,12 @@ class MatchRecorder:
                 input_name = session.get_inputs()[0].name
                 return lambda obs: np.clip(session.run(None, {input_name: obs[np.newaxis, :]})[0][0], -1.0, 1.0)
             except Exception as e:
-                print(f"[MatchRecorder] Error loading ONNX model: {e}")
+                raise RuntimeError(
+                    f"Failed to load the requested ONNX model '{model_path}'. "
+                    "Replay cancelled instead of silently substituting the heuristic policy."
+                ) from e
 
-        bot = HeuristicBot(self.ai_player_id)
-        return lambda obs: bot.get_action(self.engine)
+        raise ValueError(f"Unsupported model format for replay: '{model_path}'")
 
     def _world_to_screen(self, wx: float, wy: float) -> Tuple[int, int]:
         sx = int((wx - self.cam_x) * self.cam_zoom + self.width / 2)

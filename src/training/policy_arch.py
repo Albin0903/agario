@@ -8,8 +8,15 @@ from __future__ import annotations
 
 import math
 import re
+import sys
 import zipfile
 from typing import Any, Callable, Dict, Optional, Type, Union
+
+# SB3 imports PyTorch's TensorBoard writer. TensorBoard otherwise probes any
+# installed TensorFlow build, which can hang or fail on Colab's Python runtime.
+# This project uses TensorBoard through PyTorch only, so force TensorBoard's
+# supported TensorFlow stub unless TensorFlow was explicitly imported already.
+sys.modules.setdefault("tensorflow", None)
 
 import numpy as np
 import torch
