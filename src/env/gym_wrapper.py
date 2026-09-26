@@ -2,7 +2,7 @@
 
 SOTA V3 Architecture:
 - Multi-Action Support: MultiDiscrete([24, 3]) or continuous Box(3).
-- V10 mass objective: signed mass delta + new-peak bonus + bounded death penalty.
+- V11 mass objective: signed mass delta + new-peak bonus + bounded death penalty.
 - Zero artificial wall/danger/jerk micro-penalties (prevents policy paralysis).
 - Fully vectorized Farama Gymnasium compliance.
 """
@@ -18,9 +18,6 @@ from src.env.agar_engine import AgarEngine
 from src.env.entities import mass_to_radius
 from src.env.physics_fast import (
     find_nearest_pellets_numba,
-    find_nearest_pellets_candidates_numba,
-    find_single_nearest_pellet_numba,
-    find_single_nearest_pellet_candidates_numba,
     compute_heuristic_threat_prey,
     compute_bot_action_fast,
     extract_entities_observation_numba,
@@ -315,7 +312,7 @@ class AgarEnv(gym.Env):
         self.total_cells_eaten += total_cells_eaten
         self.episode_pellets_total += total_pellets_eaten
 
-        # Minimal V10 objective: signed mass progress plus peak progression.
+        # Growth objective: signed mass progress plus peak progression.
         delta_mass = current_mass - self.prev_mass
         previous_peak = self.peak_mass
         self.peak_mass = max(self.peak_mass, current_mass)
@@ -339,6 +336,8 @@ class AgarEnv(gym.Env):
         info = {
             "player_mass": current_mass,
             "peak_mass": self.peak_mass,
+            "action_repeat": self.action_repeat,
+            "tick_duration_seconds": self.engine.tick_duration_seconds,
             "cells_eaten": total_cells_eaten,
             "pellets_eaten": total_pellets_eaten,
             "episode_pellets": self.episode_pellets_total,
@@ -390,12 +389,8 @@ class AgarEnv(gym.Env):
         obs[3] = float(np.clip(len(my_cells) / 16.0, 0.0, 1.0))
 
         # 2. 10 nearest Pellets (20 floats) -> offset 4 to 24 (compiled Numba JIT)
-        pellet_candidates = np.asarray(
-            self.engine.spatial_grid.query_circle(cx, cy, view_r),
-            dtype=np.int32,
-        )
-        pellet_feats, nearest_dist = find_nearest_pellets_candidates_numba(
-            cx, cy, self.engine.pellets_xy, pellet_candidates, view_r, k=10
+        pellet_feats, nearest_dist = find_nearest_pellets_numba(
+            cx, cy, self.engine.pellets_xy, view_r, k=10
         )
         obs[4:24] = pellet_feats
         self._last_pellet_dist = nearest_dist

@@ -9,7 +9,7 @@ Analyzes policy weights, logits, decision entropy, and runs tactical probe scena
 
 Usage:
     python src/analysis/inspect_policy.py --model checkpoints/ppo/ppo_latest.zip
-    python src/analysis/inspect_policy.py --model /content/drive/MyDrive/agario_rl_backup_v5/ppo_latest.zip
+    python src/analysis/inspect_policy.py --model /content/drive/MyDrive/agario_rl_backup_v11/ppo_latest.zip
 """
 
 from __future__ import annotations
@@ -290,41 +290,26 @@ def probe_live_simulation(model, env: AgarEnv, num_steps: int = 1500):
 
 
 def _resolve_model_path(cli_value: str | None) -> str | None:
-    """Résout --model en ignorant le placeholder non substitué "{LATEST_MODEL}".
+    """Resolve an explicit model or the newest valid V11 checkpoint.
 
-    Dans Colab, ``!python ... --model "{LATEST_MODEL}"`` repose sur la
-    substitution ``{var}`` d'IPython. Si elle n'a pas lieu (ou si le chemin
-    n'existe pas), on bascule sur la détection V10 → V5 → checkpoints locaux.
+    Colab/IPython placeholder syntax is intentionally tolerated so a stale
+    literal ``{LATEST_MODEL}`` cannot accidentally select a V10 archive.
     """
-    if cli_value and cli_value != "{LATEST_MODEL}" and os.path.exists(cli_value):
+    if cli_value and cli_value != "{LATEST_MODEL}" and os.path.isfile(cli_value):
         return cli_value
     if cli_value and cli_value not in ("{LATEST_MODEL}",) and not os.path.exists(cli_value):
-        print(f"⚠️ Checkpoint introuvable : {cli_value} — recherche automatique…")
+        print(f"Checkpoint introuvable : {cli_value}; searching V11 checkpoints.")
 
-    candidates = []
-    for version in ("v10", "v9", "v8", "v7", "v6", "v5"):
-        candidates.extend(glob.glob(f"/content/drive/MyDrive/agario_rl_backup_{version}/*.zip"))
-    candidates.extend(glob.glob("checkpoints/ppo/*.zip"))
-    candidates.extend(sorted(glob.glob("checkpoints/self_play_pool/*.zip")))
+    candidates = glob.glob("/content/drive/MyDrive/agario_rl_backup_v11/*.zip")
+    candidates.extend(glob.glob("checkpoints/v11/*.zip"))
+    candidates.extend(glob.glob("checkpoints/v11/self_play_pool/*.zip"))
     valid = [
         c for c in candidates
         if os.path.isfile(c) and os.path.getsize(c) > 1000
         and not os.path.basename(c).startswith("._")
-        and "bc_pretrained" not in os.path.basename(c)
+        and checkpoint_num_timesteps(c) is not None
     ]
-    def candidate_key(path: str) -> tuple[int, int]:
-        name = os.path.basename(path)
-        saved_step = checkpoint_num_timesteps(path)
-        if saved_step is not None:
-            return (saved_step, 1)
-        match = re.search(r"step_(\d+)", name)
-        if match:
-            return (int(match.group(1)), 1)
-        return (0, 0)
-    def version_rank(path: str) -> int:
-        match = re.search(r"backup_v(\d+)", path)
-        return int(match.group(1)) if match else 0
-    return max(valid, key=lambda path: (*candidate_key(path), version_rank(path))) if valid else None
+    return max(valid, key=lambda path: checkpoint_num_timesteps(path) or -1) if valid else None
 
 
 def main():
@@ -334,7 +319,7 @@ def main():
     parser.add_argument("--steps", type=int, default=1500, help="Live simulation steps")
     args = parser.parse_args()
 
-    # Auto-detect checkpoint if not provided (support V10 Drive + placeholder Colab)
+    # Auto-detect only V11 checkpoints if no explicit path was provided.
     model_path = _resolve_model_path(args.model)
 
     if not model_path or not os.path.exists(model_path):

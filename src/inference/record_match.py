@@ -13,6 +13,7 @@ import sys
 import math
 import subprocess
 import argparse
+import warnings
 from typing import Optional, Tuple, Dict, Any, List
 import numpy as np
 
@@ -30,7 +31,12 @@ if hasattr(sys.stdout, "reconfigure"):
 # Set headless SDL video driver for offscreen rendering
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
+# Replays do not write event logs; avoid SB3's optional TensorBoard/TensorFlow
+# imports, which are unnecessary here and can hang on hosted runtimes.
+os.environ["AGARIO_DISABLE_TENSORBOARD"] = "1"
 
+# pygame's bundled pkg_resources lookup is noisy on newer Python/setuptools.
+warnings.filterwarnings("ignore", message="pkg_resources is deprecated as an API", category=UserWarning)
 import pygame
 import yaml
 from src.env.gym_wrapper import AgarEnv, HeuristicBot
@@ -135,7 +141,9 @@ class MatchRecorder:
         seed: int = 42,
     ):
         self.deterministic = deterministic
-        pygame.init()
+        # Rendering is entirely off-screen; initializing pygame's mixer serves
+        # no purpose and can emit ALSA device errors in Colab/containers.
+        pygame.font.init()
         self.width = screen_width
         self.height = screen_height
         self.fps = fps

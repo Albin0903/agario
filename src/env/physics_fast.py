@@ -6,6 +6,84 @@ import numpy as np
 import numba as nb
 
 
+@nb.njit(cache=True)
+def resolve_same_player_cell_interactions_numba(
+    xy: np.ndarray,
+    mass: np.ndarray,
+    cooldown: np.ndarray,
+    group_offsets: np.ndarray,
+    width: float,
+    height: float,
+):
+    """Resolve same-player subcell merge, attraction and separation natively.
+
+    `xy`, `mass`, and `cooldown` contain only players with multiple cells,
+    grouped by the half-open ranges in `group_offsets`. Pair iteration order
+    matches AgarEngine's prior Python implementation.
+    """
+    count = len(mass)
+    merged = np.zeros(count, dtype=np.bool_)
+    for group in range(len(group_offsets) - 1):
+        start = group_offsets[group]
+        stop = group_offsets[group + 1]
+        for i in range(start, stop):
+            if merged[i]:
+                continue
+            for j in range(i + 1, stop):
+                if merged[j]:
+                    continue
+
+                dx = xy[j, 0] - xy[i, 0]
+                dy = xy[j, 1] - xy[i, 1]
+                dist_sq = dx * dx + dy * dy
+                r_i = math.sqrt(max(mass[i], 1.0)) * 3.0
+                r_j = math.sqrt(max(mass[j], 1.0)) * 3.0
+                r_sum = r_i + r_j
+
+                if cooldown[i] == 0 and cooldown[j] == 0:
+                    if mass[i] >= mass[j]:
+                        large = i
+                        small = j
+                    else:
+                        large = j
+                        small = i
+                    r_large = math.sqrt(max(mass[large], 1.0)) * 3.0
+
+                    if dist_sq < r_large * r_large:
+                        mass[large] += mass[small]
+                        merged[small] = True
+                        if small == i:
+                            break
+                        continue
+                    elif dist_sq < (r_sum * 1.5) ** 2:
+                        dist = math.sqrt(max(1e-6, dist_sq))
+                        inv_d = 1.0 / dist
+                        nx = dx * inv_d
+                        ny = dy * inv_d
+                        total_mass = mass[i] + mass[j]
+                        pull = min(3.0, max(0.4, (r_sum * 1.5 - dist) * 0.10))
+                        pull_i = pull * (mass[j] / total_mass)
+                        pull_j = pull * (mass[i] / total_mass)
+                        xy[i, 0] = max(r_i, min(width - r_i, xy[i, 0] + nx * pull_i))
+                        xy[i, 1] = max(r_i, min(height - r_i, xy[i, 1] + ny * pull_i))
+                        xy[j, 0] = max(r_j, min(width - r_j, xy[j, 0] - nx * pull_j))
+                        xy[j, 1] = max(r_j, min(height - r_j, xy[j, 1] - ny * pull_j))
+                elif dist_sq < r_sum * r_sum:
+                    dist = math.sqrt(max(1e-6, dist_sq))
+                    inv_d = 1.0 / dist
+                    nx = dx * inv_d
+                    ny = dy * inv_d
+                    overlap = r_sum - dist
+                    total_mass = max(1e-4, mass[i] + mass[j])
+                    ratio_i = mass[j] / total_mass
+                    ratio_j = mass[i] / total_mass
+                    xy[i, 0] = max(r_i, min(width - r_i, xy[i, 0] - nx * overlap * ratio_i))
+                    xy[i, 1] = max(r_i, min(height - r_i, xy[i, 1] - ny * overlap * ratio_i))
+                    xy[j, 0] = max(r_j, min(width - r_j, xy[j, 0] + nx * overlap * ratio_j))
+                    xy[j, 1] = max(r_j, min(height - r_j, xy[j, 1] + ny * overlap * ratio_j))
+    return merged
+
+
 @nb.njit(fastmath=True)
 def check_pellet_collisions_numba(
     pellets_xy: np.ndarray,
@@ -115,6 +193,83 @@ def check_pellet_collisions_fast(
     return eaten_pellet_ids[:eaten_count], cell_counts
 
 
+@nb.njit(cache=True)
+def check_pellet_collisions_grid_numba(
+    pellets_xy: np.ndarray,
+    cells_xy: np.ndarray,
+    cells_r: np.ndarray,
+    width: float,
+    height: float,
+    grid_cell_size: float,
+):
+    """Pellet broadphase using a compact uniform grid built in compiled code.
+
+    Cells are visited in original order, so a pellet covered by multiple
+    cells is assigned to the same first cell as the former pellet-major loop.
+    Returned eaten indices are sorted to preserve deterministic respawn order.
+    """
+    num_pellets = len(pellets_xy)
+    num_cells = len(cells_xy)
+    cell_counts = np.zeros(num_cells, dtype=np.int32)
+    if num_cells == 0 or num_pellets == 0:
+        return np.empty(0, dtype=np.int32), cell_counts
+
+    cols = max(1, int(math.ceil(width / grid_cell_size)))
+    rows = max(1, int(math.ceil(height / grid_cell_size)))
+    bucket_count = cols * rows
+    counts = np.zeros(bucket_count, dtype=np.int32)
+    pellet_bucket = np.empty(num_pellets, dtype=np.int32)
+    inv_size = 1.0 / grid_cell_size
+
+    for p in range(num_pellets):
+        col = min(cols - 1, max(0, int(pellets_xy[p, 0] * inv_size)))
+        row = min(rows - 1, max(0, int(pellets_xy[p, 1] * inv_size)))
+        bucket = row * cols + col
+        pellet_bucket[p] = bucket
+        counts[bucket] += 1
+
+    offsets = np.empty(bucket_count + 1, dtype=np.int32)
+    offsets[0] = 0
+    for bucket in range(bucket_count):
+        offsets[bucket + 1] = offsets[bucket] + counts[bucket]
+    cursors = offsets[:-1].copy()
+    items = np.empty(num_pellets, dtype=np.int32)
+    for p in range(num_pellets):
+        bucket = pellet_bucket[p]
+        items[cursors[bucket]] = p
+        cursors[bucket] += 1
+
+    eaten = np.zeros(num_pellets, dtype=np.bool_)
+    eaten_indices = np.empty(num_pellets, dtype=np.int32)
+    eaten_count = 0
+    for c in range(num_cells):
+        cx = cells_xy[c, 0]
+        cy = cells_xy[c, 1]
+        radius = cells_r[c]
+        radius_sq = radius * radius
+        min_col = max(0, int(math.floor((cx - radius) * inv_size)))
+        max_col = min(cols - 1, int(math.floor((cx + radius) * inv_size)))
+        min_row = max(0, int(math.floor((cy - radius) * inv_size)))
+        max_row = min(rows - 1, int(math.floor((cy + radius) * inv_size)))
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                bucket = row * cols + col
+                for offset in range(offsets[bucket], offsets[bucket + 1]):
+                    p = items[offset]
+                    if eaten[p]:
+                        continue
+                    dx = pellets_xy[p, 0] - cx
+                    dy = pellets_xy[p, 1] - cy
+                    if dx * dx + dy * dy < radius_sq:
+                        eaten[p] = True
+                        cell_counts[c] += 1
+                        eaten_indices[eaten_count] = p
+                        eaten_count += 1
+
+    eaten_indices = np.sort(eaten_indices[:eaten_count])
+    return eaten_indices, cell_counts
+
+
 @nb.njit(fastmath=True)
 def find_virus_cell_collisions_numba(
     viruses_xy: np.ndarray,
@@ -221,23 +376,19 @@ def find_nearest_pellets_numba(
 
     for p in range(num_pellets):
         dx = pellets_xy[p, 0] - cx
-        if abs(dx) < view_r:
-            dy = pellets_xy[p, 1] - cy
-            if abs(dy) < view_r:
-                d_sq = dx * dx + dy * dy
-                if d_sq <= view_r_sq:
-                    # Check if this d_sq qualifies for top-k
-                    if d_sq < best_dists_sq[k - 1]:
-                        # Insert in sorted order
-                        idx = k - 1
-                        while idx > 0 and d_sq < best_dists_sq[idx - 1]:
-                            best_dists_sq[idx] = best_dists_sq[idx - 1]
-                            best_dx[idx] = best_dx[idx - 1]
-                            best_dy[idx] = best_dy[idx - 1]
-                            idx -= 1
-                        best_dists_sq[idx] = d_sq
-                        best_dx[idx] = dx
-                        best_dy[idx] = dy
+        dy = pellets_xy[p, 1] - cy
+        d_sq = dx * dx + dy * dy
+        if d_sq <= view_r_sq and d_sq < best_dists_sq[k - 1]:
+            # Insert in sorted order.
+            idx = k - 1
+            while idx > 0 and d_sq < best_dists_sq[idx - 1]:
+                best_dists_sq[idx] = best_dists_sq[idx - 1]
+                best_dx[idx] = best_dx[idx - 1]
+                best_dy[idx] = best_dy[idx - 1]
+                idx -= 1
+            best_dists_sq[idx] = d_sq
+            best_dx[idx] = dx
+            best_dy[idx] = dy
 
     # Normalized relative dx, dy in [-1, 1]
     res = np.zeros(k * 2, dtype=np.float32)

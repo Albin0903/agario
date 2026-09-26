@@ -1,4 +1,4 @@
-"""V10 policy architecture: action masking, LayerNorm/RMSNorm, cosine LR.
+"""V11 policy architecture: action masking, LayerNorm/RMSNorm, cosine LR.
 
 Does not change the environment reward function. Split legality is enforced
 by masking the split logit to -inf instead of waiting for the agent to learn it.
@@ -7,6 +7,7 @@ by masking the split logit to -inf instead of waiting for the agent to learn it.
 from __future__ import annotations
 
 import math
+import os
 import re
 import sys
 import zipfile
@@ -16,7 +17,15 @@ from typing import Any, Callable, Dict, Optional, Type, Union
 # installed TensorFlow build, which can hang or fail on Colab's Python runtime.
 # This project uses TensorBoard through PyTorch only, so force TensorBoard's
 # supported TensorFlow stub unless TensorFlow was explicitly imported already.
-sys.modules.setdefault("tensorflow", None)
+# Inference/replay never writes TensorBoard data. Tell SB3 to skip importing
+# torch.utils.tensorboard in that process: Colab's preinstalled TensorBoard may
+# probe TensorFlow (which can be broken or very slow to initialize).
+if os.environ.get("AGARIO_DISABLE_TENSORBOARD") == "1":
+    sys.modules["torch.utils.tensorboard"] = None  # SB3 treats it as optional.
+else:
+    # Training only needs TensorBoard's PyTorch writer, not TensorFlow itself.
+    # This blocks TensorBoard's optional TensorFlow compatibility probe.
+    sys.modules.setdefault("tensorflow", None)
 
 import numpy as np
 import torch
@@ -199,8 +208,8 @@ def build_policy_kwargs(ppo_cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def _v10_custom_objects() -> Dict[str, Any]:
-    """Classes custom à injecter au chargement d'un checkpoint V10 MaskablePPO.
+def custom_policy_objects() -> Dict[str, Any]:
+    """Classes custom à injecter au chargement d'un checkpoint V11 MaskablePPO.
 
     SB3 sérialise la classe de politique par référence ; sans `custom_objects`,
     `MaskablePPO.load()` échoue avec `Policy must subclass
@@ -232,29 +241,16 @@ def checkpoint_num_timesteps(path: str) -> Optional[int]:
         return None
 
 
-def load_trained_model(path: str, allow_legacy: bool = True, **kwargs):
-    """Load MaskablePPO, optionally allowing legacy vanilla PPO checkpoints."""
-    last_error: Optional[Exception] = None
+def load_trained_model(path: str, **kwargs):
+    """Load a V11-compatible MaskablePPO checkpoint; reject other formats."""
     try:
         from sb3_contrib import MaskablePPO
-
-        # D'abord avec les classes V10 (LayerNorm), sinon chargement standard.
-        try:
-            return MaskablePPO.load(path, custom_objects=_v10_custom_objects(), **kwargs)
-        except Exception:
-            return MaskablePPO.load(path, **kwargs)
     except Exception as exc:
-        last_error = exc
-    if not allow_legacy:
-        raise RuntimeError(f"'{path}' is not a V10 MaskablePPO checkpoint") from last_error
+        raise ImportError("V11 model loading requires sb3-contrib") from exc
     try:
-        from stable_baselines3 import PPO
-
-        return PPO.load(path, **kwargs)
+        return MaskablePPO.load(path, custom_objects=custom_policy_objects(), **kwargs)
     except Exception as exc:
-        raise RuntimeError(
-            f"Could not load '{path}' as MaskablePPO ({last_error}) or PPO ({exc})"
-        ) from exc
+        raise RuntimeError(f"Could not load '{path}' as a V11 MaskablePPO checkpoint") from exc
 
 
 def predict_action(

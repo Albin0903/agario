@@ -116,7 +116,7 @@ def test_subcell_aware_prey_predator_observation():
     assert pred1_dx != 0.0, "True enemy threatening largest cell must appear in predator observation slots!"
 
 
-def test_v10_sota_reward_proportionality_and_masked_split():
+def test_v11_reward_proportionality_and_masked_split():
     """Verify proportional kills and zero reward friction for invalid splits."""
     env = AgarEnv()
     obs, info = env.reset(seed=42)
@@ -142,7 +142,7 @@ def test_v10_sota_reward_proportionality_and_masked_split():
     assert rew_big > 4.0, f"Expected positive mass-growth reward, got {rew_big}"
 
 
-def test_v10_peak_mass_is_monotonic_and_exposed():
+def test_peak_mass_is_monotonic_and_exposed():
     """Peak mass records only increase and are reported for evaluation metrics."""
     env = AgarEnv()
     env.reset(seed=42)
@@ -161,7 +161,7 @@ def test_v10_peak_mass_is_monotonic_and_exposed():
     assert reward < 0.0
 
 
-def test_v10_growth_below_peak_remains_rewarded():
+def test_growth_below_peak_remains_rewarded():
     """Mass gained below the episode record must still produce positive growth reward."""
     env = AgarEnv(config={"simulation": {"num_bots": 0}, "entities": {"num_pellets": 0}})
     env.reset(seed=42)
@@ -177,5 +177,3 @@ def test_v10_growth_below_peak_remains_rewarded():
     assert info["reward_mass_growth"] > 2.4
     assert info["reward_peak"] == 0.0
     assert reward > 0.0
-
-

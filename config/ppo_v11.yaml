@@ -1,0 +1,44 @@
+# V11 policy/training definition. Hardware-dependent parallelism is selected
+# by running benchmarks in the active Colab runtime before the 20M-step run.
+version: v11
+
+ppo:
+  total_timesteps: 20000000
+  learning_rate: 0.0003
+  learning_rate_end: 0.00001
+  lr_schedule: cosine
+  n_steps: 2048
+  batch_size: 1024
+  n_epochs: 8
+  gamma: 0.997                 # 0.12 s/action; about 28 s discount half-life
+  gae_lambda: 0.95
+  clip_range: 0.2
+  target_kl: 0.05
+  normalize_advantage: true
+  ent_coef: 0.005
+  vf_coef: 0.5
+  max_grad_norm: 0.5
+  reward_normalization: true
+
+policy:
+  features_dim: 512
+  norm: layernorm
+  net_arch:
+    pi: [512, 512, 512]
+    vf: [512, 512, 512]
+  activation_fn: silu
+
+self_play:
+  update_interval_steps: 250000
+  max_pool_size: 20
+  history_dir: checkpoints/v11/self_play_pool
+  save_dir: checkpoints/v11
+  heuristic_opponent_ratio: 0.3
+  current_opponent_ratio: 0.2
+  pfsp_power: 1.5
+
+logging:
+  metrics_interval_steps: 25000
+  drive_sync_interval_seconds: 300
+  checkpoint_interval_steps: 250000
+  output_dir: checkpoints/v11

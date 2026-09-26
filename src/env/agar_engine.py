@@ -7,85 +7,13 @@ from typing import Dict, List, Tuple, Optional, Any
 import numpy as np
 from src.env.entities import mass_to_radius, mass_to_speed, Pellet, Virus, Cell, EjectedMass
 from src.env.physics_fast import (
-    check_pellet_collisions_numba,
-    check_pellet_collisions_fast,
+    check_pellet_collisions_grid_numba,
     find_virus_cell_collisions_numba,
     find_cell_eat_events_numba,
     spawn_pellet_coords_fast,
     compute_centroids_numba,
+    resolve_same_player_cell_interactions_numba,
 )
-
-
-class SpatialHashGrid:
-    """Uniform 2D spatial hash grid for accelerating point entity queries (pellets)."""
-
-    def __init__(self, width: float, height: float, cell_size: float = 100.0):
-        self.width = width
-        self.height = height
-        self.cell_size = cell_size
-        self.inv_cell = 1.0 / cell_size
-        self.cols = int(math.ceil(width / cell_size))
-        self.rows = int(math.ceil(height / cell_size))
-        self.total_cells = self.cols * self.rows
-        self.buckets: List[set] = [set() for _ in range(self.total_cells)]
-        self.pellet_buckets: np.ndarray = np.zeros(0, dtype=np.int32)
-
-    def clear(self) -> None:
-        for b in self.buckets:
-            b.clear()
-
-    def build(self, pellets_xy: np.ndarray) -> None:
-        """Populate the grid with pellet positions (N, 2)."""
-        self.clear()
-        n = len(pellets_xy)
-        if len(self.pellet_buckets) != n:
-            self.pellet_buckets = np.zeros(n, dtype=np.int32)
-
-        cols = np.clip((pellets_xy[:, 0] * self.inv_cell).astype(np.int32), 0, self.cols - 1)
-        rows = np.clip((pellets_xy[:, 1] * self.inv_cell).astype(np.int32), 0, self.rows - 1)
-        indices = rows * self.cols + cols
-        self.pellet_buckets[:] = indices
-        for i, idx in enumerate(indices):
-            self.buckets[idx].add(i)
-
-    def update_pellet(self, idx: int, new_x: float, new_y: float) -> None:
-        """Incrementally update single pellet position bucket."""
-        c = int(new_x * self.inv_cell)
-        r = int(new_y * self.inv_cell)
-        if c < 0: c = 0
-        elif c >= self.cols: c = self.cols - 1
-        if r < 0: r = 0
-        elif r >= self.rows: r = self.rows - 1
-        new_bucket = r * self.cols + c
-        old_bucket = int(self.pellet_buckets[idx])
-        if new_bucket != old_bucket:
-            self.buckets[old_bucket].discard(idx)
-            self.buckets[new_bucket].add(idx)
-            self.pellet_buckets[idx] = new_bucket
-
-    def query_circle(self, x: float, y: float, radius: float) -> List[int]:
-        """Query all pellet indices located in grid buckets overlapping a circle."""
-        min_c = int((x - radius) * self.inv_cell)
-        max_c = int((x + radius) * self.inv_cell)
-        min_r = int((y - radius) * self.inv_cell)
-        max_r = int((y + radius) * self.inv_cell)
-
-        if min_c < 0: min_c = 0
-        elif min_c >= self.cols: min_c = self.cols - 1
-        if max_c < 0: max_c = 0
-        elif max_c >= self.cols: max_c = self.cols - 1
-
-        if min_r < 0: min_r = 0
-        elif min_r >= self.rows: min_r = self.rows - 1
-        if max_r < 0: max_r = 0
-        elif max_r >= self.rows: max_r = self.rows - 1
-
-        candidates: List[int] = []
-        for r in range(min_r, max_r + 1):
-            base = r * self.cols
-            for c in range(min_c, max_c + 1):
-                candidates.extend(self.buckets[base + c])
-        return candidates
 
 
 class AgarEngine:
@@ -148,7 +76,9 @@ class AgarEngine:
         self.tick_duration_seconds = float(tick_duration_seconds)
 
         self.rng = np.random.default_rng(seed)
-        self.spatial_grid = SpatialHashGrid(self.width, self.height, cell_size=spatial_cell_size)
+        if spatial_cell_size <= 0.0:
+            raise ValueError("spatial_cell_size must be positive")
+        self.spatial_grid_cell_size = float(spatial_cell_size)
 
         # Entity arrays
         self.pellets_xy: np.ndarray = np.zeros((num_pellets, 2), dtype=np.float32)
@@ -280,7 +210,6 @@ class AgarEngine:
         px, py = self._spawn_pellet_coords(self.num_pellets)
         self.pellets_xy[:, 0] = px
         self.pellets_xy[:, 1] = py
-        self.spatial_grid.build(self.pellets_xy)
 
         self.cells.clear()
         self.ejected.clear()
@@ -858,84 +787,50 @@ class AgarEngine:
         if len(self.cells) == len(self._player_cells_cache):
             return
 
-        surviving: List[Cell] = []
-        for pid, p_cells in self._player_cells_cache.items():
-            if len(p_cells) <= 1:
-                surviving.extend(p_cells)
-                continue
+        grouped_cells = [cells for cells in self._player_cells_cache.values() if len(cells) > 1]
+        if not grouped_cells:
+            return
 
-            merged_ids = set()
-            for i in range(len(p_cells)):
-                ci = p_cells[i]
-                if ci.id in merged_ids:
-                    continue
-                for j in range(i + 1, len(p_cells)):
-                    cj = p_cells[j]
-                    if cj.id in merged_ids:
-                        continue
+        active_cells: List[Cell] = []
+        offsets = [0]
+        for group in grouped_cells:
+            active_cells.extend(group)
+            offsets.append(len(active_cells))
 
-                    dx = cj.x - ci.x
-                    dy = cj.y - ci.y
-                    dist_sq = dx * dx + dy * dy
-                    r_i = ci.radius
-                    r_j = cj.radius
-                    r_sum = r_i + r_j
+        xy = np.empty((len(active_cells), 2), dtype=np.float64)
+        mass = np.empty(len(active_cells), dtype=np.float64)
+        cooldown = np.empty(len(active_cells), dtype=np.int64)
+        for i, cell in enumerate(active_cells):
+            xy[i, 0] = cell.x
+            xy[i, 1] = cell.y
+            mass[i] = cell.mass
+            cooldown[i] = cell.remerge_cooldown
 
-                    w = self.width
-                    h = self.height
+        merged = resolve_same_player_cell_interactions_numba(
+            xy,
+            mass,
+            cooldown,
+            np.asarray(offsets, dtype=np.int64),
+            self.width,
+            self.height,
+        )
 
-                    if ci.remerge_cooldown == 0 and cj.remerge_cooldown == 0:
-                        # Once timers expire, cells are allowed to slide into each other (no rigid push)
-                        if ci.mass >= cj.mass:
-                            c_large, c_small = ci, cj
-                            r_large = r_i
-                        else:
-                            c_large, c_small = cj, ci
-                            r_large = r_j
+        merged_ids = set()
+        cache_changed = False
+        for i, cell in enumerate(active_cells):
+            new_x = float(xy[i, 0])
+            new_y = float(xy[i, 1])
+            new_mass = float(mass[i])
+            cache_changed |= cell.x != new_x or cell.y != new_y or cell.mass != new_mass
+            cell.x = new_x
+            cell.y = new_y
+            cell.mass = new_mass
+            if merged[i]:
+                merged_ids.add(cell.id)
 
-                        # Deep penetration absorption: center of smaller cell must enter inside the boundary of larger cell
-                        if dist_sq < r_large * r_large:
-                            c_large.mass += c_small.mass
-                            merged_ids.add(c_small.id)
-                            if c_small is ci:
-                                break
-                            continue
-                        elif dist_sq < (r_sum * 1.5) ** 2:
-                            # Gentle mass-weighted mutual attraction: smaller cell accelerates much faster towards larger cell
-                            dist = math.sqrt(max(1e-6, dist_sq))
-                            inv_d = 1.0 / dist
-                            nx = dx * inv_d
-                            ny = dy * inv_d
-                            total_m = ci.mass + cj.mass
-                            pull_mag = min(3.0, max(0.4, (r_sum * 1.5 - dist) * 0.10))
-                            pull_i = pull_mag * (cj.mass / total_m)
-                            pull_j = pull_mag * (ci.mass / total_m)
-                            ci.x = max(r_i, min(w - r_i, ci.x + nx * pull_i))
-                            ci.y = max(r_i, min(h - r_i, ci.y + ny * pull_i))
-                            cj.x = max(r_j, min(w - r_j, cj.x - nx * pull_j))
-                            cj.y = max(r_j, min(h - r_j, cj.y - ny * pull_j))
-                    else:
-                        # Elastic rigid push apart to maintain separation while unmerged
-                        if dist_sq < r_sum * r_sum:
-                            dist = math.sqrt(max(1e-6, dist_sq))
-                            inv_d = 1.0 / dist
-                            nx = dx * inv_d
-                            ny = dy * inv_d
-                            overlap = r_sum - dist
-                            total_m = max(1e-4, ci.mass + cj.mass)
-                            ratio_i = cj.mass / total_m
-                            ratio_j = ci.mass / total_m
-                            ci.x = max(r_i, min(w - r_i, ci.x - nx * overlap * ratio_i))
-                            ci.y = max(r_i, min(h - r_i, ci.y - ny * overlap * ratio_i))
-                            cj.x = max(r_j, min(w - r_j, cj.x + nx * overlap * ratio_j))
-                            cj.y = max(r_j, min(h - r_j, cj.y + ny * overlap * ratio_j))
-
-            for c in p_cells:
-                if c.id not in merged_ids:
-                    surviving.append(c)
-
-        if len(surviving) != len(self.cells):
-            self.cells = surviving
+        if merged_ids:
+            self.cells = [cell for cell in self.cells if cell.id not in merged_ids]
+        if merged_ids or cache_changed:
             self._cells_cache_valid = False
 
     def _resolve_pellet_collisions(self) -> None:
@@ -944,8 +839,13 @@ class AgarEngine:
             return
 
         self._refresh_player_cache()
-        eaten_pellet_indices, cell_counts = check_pellet_collisions_fast(
-            self.pellets_xy, self.cells_xy, self.cells_r
+        eaten_pellet_indices, cell_counts = check_pellet_collisions_grid_numba(
+            self.pellets_xy,
+            self.cells_xy,
+            self.cells_r,
+            self.width,
+            self.height,
+            self.spatial_grid_cell_size,
         )
         if len(eaten_pellet_indices) == 0:
             return
@@ -994,8 +894,6 @@ class AgarEngine:
         new_x, new_y = self._spawn_pellet_coords(len(eaten_pellet_indices))
         self.pellets_xy[eaten_pellet_indices, 0] = new_x
         self.pellets_xy[eaten_pellet_indices, 1] = new_y
-        for idx, nx, ny in zip(eaten_pellet_indices, new_x, new_y):
-            self.spatial_grid.update_pellet(int(idx), float(nx), float(ny))
 
         self._cells_cache_valid = False
 

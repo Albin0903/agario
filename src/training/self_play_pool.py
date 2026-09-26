@@ -68,7 +68,7 @@ class SelfPlayPool:
 
         # Load policy on specified device with no grad
         try:
-            model = load_trained_model(checkpoint_path, device=self.device, allow_legacy=False)
+            model = load_trained_model(checkpoint_path, device=self.device)
             policy = model.policy
             policy.eval()
             for p in policy.parameters():

@@ -11,17 +11,26 @@ import pytest
 import onnx
 import onnxruntime as ort
 import torch
-from stable_baselines3 import PPO
+from sb3_contrib import MaskablePPO
 
 from src.env.gym_wrapper import AgarEnv
 from src.inference.export_onnx import export_to_onnx, benchmark_onnx_model, OnnxPolicyWrapper
+from src.training.policy_arch import LayerNormMaskablePolicy, build_policy_kwargs
 
 
 def test_onnx_export_and_benchmark(tmp_path):
     """Verify that export creates valid ONNX with static (1, 84) -> (1, 3) signature and < 2ms latency."""
-    # 1. Create and save a small dummy PPO model
+    # 1. Create and save a small V11-compatible MaskablePPO model.
     env = AgarEnv()
-    model = PPO("MlpPolicy", env, n_steps=64, batch_size=32, n_epochs=1, verbose=0)
+    model = MaskablePPO(
+        LayerNormMaskablePolicy,
+        env,
+        n_steps=64,
+        batch_size=32,
+        n_epochs=1,
+        policy_kwargs=build_policy_kwargs({}),
+        verbose=0,
+    )
     model.learn(total_timesteps=64)
 
     dummy_model_path = str(tmp_path / "test_model.zip")
@@ -70,4 +79,3 @@ def test_onnx_export_and_benchmark(tmp_path):
     avg_ms = ((t1 - t0) / runs) * 1000.0
     print(f"\n[Test ONNX Latency] {avg_ms:.4f} ms per inference on CPU")
     assert avg_ms < 2.0, f"Latency {avg_ms:.4f} ms exceeds 2.0 ms threshold!"
-

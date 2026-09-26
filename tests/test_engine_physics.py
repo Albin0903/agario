@@ -38,7 +38,6 @@ def test_pellet_consumption_and_mass_conservation():
     # Place 5 pellets directly inside the player's radius
     for i in range(5):
         engine.pellets_xy[i] = [500.0 + i, 500.0 + i]
-    engine.spatial_grid.build(engine.pellets_xy)
 
     # Step with idle action
     engine.step({0: np.array([0.0, 0.0, -1.0], dtype=np.float32)})

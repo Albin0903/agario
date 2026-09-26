@@ -1,5 +1,6 @@
-# AGAR-RL V3 Environment Configuration
-# SOTA Minimalist Formulation (AgarCL / AgarIA standard)
+# AGAR-RL simulation parameters.
+# Miniclip publishes the gameplay objective but not these numeric physics constants;
+# see docs/V11_DESIGN.md for the source/provenance boundary.
 
 arena:
   width: 1400.0               # Balanced arena for 20 bots
@@ -9,30 +10,30 @@ physics:
   v_base: 3.5
   v_min: 0.8
   v_mass_exponent: -0.2
-  radius_scale: 3.0            # r = sqrt(m) * 3
-  eat_ratio: 1.1               # m_A >= 1.1 * m_B to consume
+  radius_scale: 3.0            # Simulation approximation; official radius curve is unpublished
+  eat_ratio: 1.1               # Simulation approximation; official numeric eat threshold is unpublished
   initial_player_mass: 20.0
   min_cell_mass: 10.0
-  min_split_mass: 36.0          # Authentic Agar.io standard (36 mass splits into two 18 mass cells)
-  max_subcells: 16              # Official Agar.io limit (16 cells max for splits and virus absorption)
-  max_cell_mass: 2250.0         # Authentic Agar.io mass cap (22,500 in 14k map -> 2,250 in 1.4k map)
-  remerge_cooldown_ticks: 600
+  min_split_mass: 36.0          # Configurable approximation; official threshold is not published
+  max_subcells: 16              # Simulation cap; verify against the chosen official client/mode
+  max_cell_mass: 2250.0         # Simulation cap; official value is not published
+  remerge_cooldown_ticks: 600   # Simulation ticks; official cooldown is not published
   remerge_cooldown_mass_factor: 0.5
   split_boost_speed: 26.0
   split_boost_decay: 0.90
-  eject_loss_mass: 16.0
-  eject_spawn_mass: 12.0
-  eject_speed: 18.0
-  min_decay_mass: 100.0
-  mass_decay_rate: 0.002            # 0.2% of current mass per simulated second, above 100 mass
+  eject_loss_mass: 16.0        # Simulation approximation
+  eject_spawn_mass: 12.0       # Simulation approximation
+  eject_speed: 18.0            # Simulation units/tick
+  min_decay_mass: 100.0         # Simulation approximation
+  mass_decay_rate: 0.002        # User-selected 0.2%/simulated-second approximation; not an official published rate
 
 entities:
   num_pellets: 2000             # Dense food field for constant growth
   pellet_mass: 1.0
-  num_viruses: 8                # Authentic virus hazards and shields
+  num_viruses: 8                # Training arena population, not a published Classic-mode constant
   virus_mass: 100.0
   virus_radius: 24.0
-  virus_split_threshold: 130.0        # Cells above 130 split on virus contact
+  virus_split_threshold: 130.0 # Simulation approximation; official threshold is not published
 
 observation:
   view_radius_base: 500.0
@@ -53,8 +54,8 @@ rewards:
   death_penalty_max: 10.0       # Terminal penalty on being eaten
 
 simulation:
-  max_steps: 3500               # Match length in ticks
+  max_steps: 3500               # RL decisions per episode
   tick_duration_seconds: 0.04   # 25 physics ticks per simulated second
-  action_repeat: 3              # 3 physics ticks per RL decision step (macro-actions)
+  action_repeat: 3              # 3 physics ticks per RL decision; episode horizon = 420 simulated seconds
   num_bots: 20                  # SOTA dense multi-agent arena
   spatial_grid_cell_size: 100.0 # Fast spatial hashing
