@@ -73,22 +73,33 @@ fallback search through older model versions.
 
 ## Performance policy
 
-The simulator is CPU work; PPO updates use the GPU. The A100 profile must be
-measured in the target Colab runtime and includes end-to-end environment
-throughput, PPO update time, peak allocated VRAM, and CPU utilization. A raw
-engine FPS number is not an end-to-end training FPS number. Candidate
-`n_envs`, rollout length, batch size, and epochs are benchmarked on the actual
-GPU before training; the notebook records the selected profile and results.
-No A100 performance result is claimed from this CPU-only development machine.
-SB3 advises against running more `SubprocVecEnv` workers than logical CPU
-cores for compute-bound environments, so the V11 notebook records both core
-count and measured throughput instead of hard-coding the old 16-worker profile.
-For CUDA, PyTorch's `high` float32 matmul mode permits TensorFloat-32 on
-Ampere-class GPUs while preserving float32 tensors and outputs; it trades some
-mantissa precision for matrix-multiply speed and must be measured with PPO's
-losses and throughput.
+The physics engine is **CPU-only**. Its hot kernels are Numba `njit` functions
+compiled to native CPU code; none use `parallel=True`/`prange`, and there is no
+CUDA physics backend. The environment workers therefore parallelize across
+processes: one CPU worker and one BLAS/OpenMP/Numba thread per environment.
+This avoids nested thread oversubscription. `effective_cpu_count()` caps the
+worker sweep using process affinity and cgroup CPU quota. The learner also
+uses one PyTorch intra-op and inter-op CPU thread.
 
-References: [SB3 vectorized environments](https://stable-baselines3.readthedocs.io/en/master/guide/vec_envs.html), [SB3 PPO](https://stable-baselines3.readthedocs.io/en/master/modules/ppo.html), [PyTorch matmul precision](https://docs.pytorch.org/docs/main/generated/torch.set_float32_matmul_precision.html).
+PPO policy updates can run on CPU or CUDA. The first-run Colab profile compares
+both devices and worker counts using end-to-end SB3 steps/s with fixed rollout,
+batch, and epoch settings; it writes the measured winner to the V11 manifest.
+During training the logs record a GPU utilization snapshot and allocated/used
+memory. These are samples, not interval averages. A raw engine tick rate is
+not an end-to-end training FPS. No A100/L4 result is claimed until the notebook
+has run on that actual Colab runtime.
+
+SB3 says compute-bound `SubprocVecEnv` worker count should not exceed the
+logical CPU cores available to the process. Numba supports thread masks for
+parallel kernels, but this engine uses serial kernels inside each worker, so
+turning up Numba's thread pool would not accelerate the current workload.
+PyTorch's `high` float32 matmul mode permits TensorFloat-32 on Ampere-class
+GPUs while retaining float32 tensors; the profile measures whether this helps
+the PPO update on the active device. A CUDA rewrite of the physics would add
+transfers and kernel-launch overhead to a small per-environment workload; only
+a measured end-to-end win would justify adding it.
+
+References: [SB3 vectorized environments](https://stable-baselines3.readthedocs.io/en/v2.4.0/guide/vec_envs.html), [SB3 PPO](https://stable-baselines3.readthedocs.io/en/v2.5.0/modules/ppo.html), [Numba threading layers](https://numba.readthedocs.io/en/stable/user/threading-layer.html), [PyTorch matmul precision](https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html).
 
 Numba kernels are compiled native code and remain the first optimization
 target. A separate C/C++ extension is justified only if profiling identifies
@@ -100,34 +111,68 @@ collisions. The old quadratic Numba kernel remains available as a differential
 reference. On this Windows CPU, one isolated kernel microbenchmark with 2,000
 pellets and 40 cells measured 32.92 microseconds/call for the old broadphase
 and 10.59 microseconds/call for the grid version (3.11x median speedup across
-seven batches of 500 calls). The integrated synthetic profile command is
+seven batches of 500 calls). The latest integrated profile command is
 `python -m src.analysis.profile_engine --steps 4000 --warmup-steps 250 --json`;
-five post-change runs measured 3,797–4,041 engine ticks/s, with 25.6–26.3% of
-profiled wall time in pellet handling. These CPU numbers do not predict Colab
-A100 training throughput.
+it measured 4,131 engine ticks/s with 99.15% phase coverage (pellets 25.07%,
+remerge 19.61%, integration/centroids 19.15%, movement 16.60%) in the earlier
+recorded run. The latest verification run measured 1,899 ticks/s with 98.99%
+coverage (pellets 25.82%, remerge 20.46%, integration/centroids 19.32%,
+movement 13.93%). The whole-env
+profile `python -m src.analysis.profile_env --steps 2000 --warmup-steps 200
+--json` most recently measured 824 decisions/s, or 2,472 physics ticks/s, with
+20 bots and 2,000 pellets (an earlier run measured 2,055 decisions/s). These
+single-machine CPU measurements vary with host load and do not predict Colab
+A100/L4 training throughput.
 
 `src/analysis/profile_env.py` measures one whole `AgarEnv.step`, including bot
 actions, observations, and all three physics ticks. Its first local 300-step
 smoke measurement was 1,067 decisions/s (3,201 engine ticks/s) with 20 bots
 and 2,000 pellets. The Colab notebook runs this alongside the phase profiler
-and the actual SB3 profile so each throughput number has a clear scope.
+and the actual CPU/CUDA SB3 profile so each throughput number has a clear scope.
+
+## Training telemetry and scenario checks
+
+Every 100k timesteps, `metrics.jsonl` records current mass and peak-mass p50/p90/max,
+kills/pellets per 100k, reward components, episode return and length, death
+rate, longest completed episode and longest survived episode, plus the
+longest live streak observed since process start. It also records requested
+split actions, actual split cells, ejects, rolling training FPS, normalized
+host load, and GPU utilization/memory snapshots.
+
+Split efficiency uses a fixed, inspectable attribution: each split action is
+held open for 30 agent decisions; the next kill credits the most recent open
+split; unresolved splits count as without a kill when the window expires or
+the episode ends. This metric is logged only and does not alter the reward.
+
+At every million-step milestone, the saved checkpoint is evaluated on five
+held-out seeds in three deterministic scenario families: standard, half the
+pellets, and 150% of the configured bot count. `scenario_evaluations.jsonl`
+stores each episode's peak/final mass, survival, kills, pellets, split outcome,
+reward components, and simulated duration. The fixed seeds are reused across
+milestones. The test is resumable by scenario and seed if Colab is interrupted.
+The evaluation notebook plots peak mass, survival, and split-to-kill rate by
+scenario so reward alone is not mistaken for policy improvement.
 
 ## Checkpointing and stopping
 
 V11 checkpoints are written locally first, then mirrored to Drive with a
-manifest containing the actual model timestep. The checkpoint and manifest
-are replaced atomically where the filesystem permits. A normal notebook
-interrupt requests a final save and sync. The evaluation notebook only reads
-the V11 output directory and compares checkpoints on the same fixed seeds.
+manifest containing the actual model timestep and the matching immutable model
+and VecNormalize filenames. The manifest is published last; resume checks the
+checkpoint's internal timestep against it and stops on a mismatch. Drive restore
+copies only the manifest checkpoint and active self-play league, not every
+historical archive. A normal notebook interrupt requests a final save and sync.
+The evaluation notebook uses each checkpoint's matching normalizer and compares
+checkpoints on the same fixed seeds.
 
-## Current verified milestone
+## Verification record
 
 - The replay import path no longer eagerly imports the entire training
   package.
 - Headless replay initializes fonts without opening an audio device.
 - Replays disable SB3's optional TensorBoard writer, avoiding an unnecessary
   TensorFlow probe in hosted environments.
-- Local baseline suite: 41 tests passed before these changes; 41 tests passed
-  after the replay fix.
+- The full suite passed 59 tests after installing the project's declared
+  `onnx` dependency; five warnings come from the existing Torch ONNX exporter.
+- Both notebook files' code cells parse successfully, and `compileall` passes.
 - V11 policy-only warm-start transfer: 4 focused tests pass, including a
   synthetic MaskablePPO archive that proves optimizer state stays fresh.

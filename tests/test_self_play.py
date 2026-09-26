@@ -64,6 +64,51 @@ def test_self_play_pool_lifecycle(tmp_path):
     assert sampled.score in [20.0, 30.0, 40.0]
 
 
+def test_lazy_pool_discovers_new_training_checkpoints_without_loading_all_weights(tmp_path):
+    from src.training.self_play_pool import SelfPlayPool
+
+    history = tmp_path / "pool"
+    checkpoints = tmp_path / "run"
+    history.mkdir()
+    checkpoints.mkdir()
+    archive = checkpoints / "ppo_step_250000.zip"
+    archive.write_bytes(b"x" * 2048)
+    pool = SelfPlayPool(
+        max_size=4,
+        history_dir=str(history),
+        checkpoint_dirs=[str(checkpoints)],
+        preload_models=False,
+    )
+    assert pool.sync_from_disk(persist_state=False) == 1
+    assert len(pool) == 1
+    assert pool.pool[0].tag == archive.stem
+    assert pool.pool[0].policy is None
+    assert not (history / "pool_state.json").exists()
+
+
+def test_lazy_pool_restores_metadata_by_checkpoint_basename(tmp_path):
+    import json
+    from src.training.self_play_pool import SelfPlayPool
+
+    history = tmp_path / "pool"
+    checkpoints = tmp_path / "run"
+    history.mkdir()
+    checkpoints.mkdir()
+    archive = checkpoints / "ppo_step_500000.zip"
+    archive.write_bytes(b"x" * 2048)
+    (history / "pool_state.json").write_text(json.dumps([{
+        "tag": "generation_500k", "path": "/old/colab/path/ppo_step_500000.zip",
+        "generation": 4, "score": 12.5, "win_rate": 0.75,
+    }]), encoding="utf-8")
+    pool = SelfPlayPool(
+        history_dir=str(history), checkpoint_dirs=[str(checkpoints)], preload_models=False,
+    )
+    assert pool.sync_from_disk(persist_state=False) == 1
+    assert pool.pool[0].tag == "generation_500k"
+    assert pool.pool[0].win_rate == 0.75
+    assert pool.pool[0].score == 12.5
+
+
 def test_environment_multiagent_interaction():
     """Verify environment steps correctly with heuristic bots actively reacting."""
     env = AgarEnv()
@@ -79,4 +124,3 @@ def test_environment_multiagent_interaction():
     # Check that opponents are alive and active
     active_bot_cells = [c for c in env.engine.cells if c.player_id > 0]
     assert len(active_bot_cells) > 0
-

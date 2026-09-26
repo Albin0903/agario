@@ -25,11 +25,13 @@ python -m src.training.train_v11 --resume-v11 auto --save-dir checkpoints/v11 \
   --history-dir checkpoints/v11/self_play_pool --n-envs 8
 ```
 
-Le notebook Colab profile automatiquement `n_envs` et `batch_size`; à la reprise il lit le profil du manifeste. Le débit dépend du runtime et du nombre de cœurs CPU disponibles pour les environnements, donc les résultats du profil doivent être mesurés sur la session active.
+Le notebook Colab profile automatiquement le choix CPU/CUDA, `n_envs` et `batch_size`; à la reprise il réutilise le profil du manifeste. Le moteur Numba et les workers d’environnement tournent sur CPU, avec un thread de calcul par worker; le notebook mesure si les mises à jour PPO sont plus rapides sur CPU ou sur le GPU actif.
 
 ## Évaluation et replay
 
 [`notebooks/eval_drive_models.ipynb`](notebooks/eval_drive_models.ipynb) compare les checkpoints V11 sur les mêmes graines, puis enregistre un replay du dernier modèle. L’évaluation écrit les résultats partiels dans le dossier Drive V11 et peut reprendre après interruption.
+
+Pendant l’entraînement, `metrics.jsonl` reçoit des fenêtres de comportement tous les 100k pas. À chaque million, `scenario_evaluations.jsonl` reçoit cinq graines fixes pour chacun des cas standard, demi-densité de pellets et 150% du nombre de bots. Le taux de split utile attribue un kill au split le plus récent dans les 30 décisions précédentes; c’est une mesure de diagnostic, pas une preuve causale.
 
 ```bash
 python -m src.analysis.evaluate_v11 --checkpoint-dir checkpoints/v11 \

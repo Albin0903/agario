@@ -262,11 +262,14 @@ class AgarEnv(gym.Env):
         """Advance environment by one timestep with learning agent action (applying action_repeat)."""
         self.current_step += 1
         engine_action = self.parse_action(action)
+        split_requested = bool(engine_action[2] > 0.6)
+        eject_requested = bool(0.2 < engine_action[2] <= 0.6)
 
         total_cells_eaten = 0
         total_pellets_eaten = 0
         total_mass_eaten = 0.0
         total_splits = 0
+        total_ejects = 0
         died = False
 
         pre_learning_cells = self.engine.get_player_cells(self.learning_player_id)
@@ -302,6 +305,7 @@ class AgarEnv(gym.Env):
             total_pellets_eaten += player_events.get("pellets_eaten", 0)
             total_mass_eaten += player_events.get("mass_eaten", 0.0)
             total_splits += player_events.get("splits", 0)
+            total_ejects += player_events.get("ejects", 0)
 
             learning_cells = self.engine.get_player_cells(self.learning_player_id)
             if player_events.get("died", False) or (len(learning_cells) == 0):
@@ -339,11 +343,15 @@ class AgarEnv(gym.Env):
             "action_repeat": self.action_repeat,
             "tick_duration_seconds": self.engine.tick_duration_seconds,
             "cells_eaten": total_cells_eaten,
+            "mass_eaten": total_mass_eaten,
             "pellets_eaten": total_pellets_eaten,
             "episode_pellets": self.episode_pellets_total,
             "episode_kills": self.total_cells_eaten,
             "died": died,
+            "split_requested": split_requested,
             "splits": total_splits,
+            "eject_requested": eject_requested,
+            "ejects": total_ejects,
             "reward_mass": r_growth,
             "reward_mass_growth": r_growth,
             "reward_peak": r_peak,

@@ -126,16 +126,6 @@ def evaluate_checkpoints(
     checkpoints = _discover_checkpoints(folder, limit_checkpoints)
     with open(env_config_path, "r", encoding="utf-8") as handle:
         env_config = yaml.safe_load(handle) or {}
-    norm_path = folder / "vec_normalize.pkl"
-    if not norm_path.is_file():
-        raise FileNotFoundError(f"V11 VecNormalize statistics not found: {norm_path}")
-
-    vec_env = DummyVecEnv([_make_env(env_config, seed)])
-    vec_env = VecMonitor(vec_env)
-    vec_env = VecNormalize.load(str(norm_path), vec_env)
-    vec_env.training = False
-    vec_env.norm_reward = False
-
     results: list[dict[str, Any]] = []
     results_path = Path(output_json)
     if resume_results and results_path.is_file():
@@ -160,6 +150,19 @@ def evaluate_checkpoints(
         if not pending_seeds:
             print(f"[V11 eval {step:>10,}] already complete; skipping")
             continue
+        norm_name = f"vec_normalize_step_{step}.pkl"
+        norm_path = folder / norm_name
+        if not norm_path.is_file():
+            # Compatibility with early V11 archives that stored only a rolling
+            # normalizer alias. New runs retain a same-step immutable copy.
+            norm_path = folder / "vec_normalize.pkl"
+        if not norm_path.is_file():
+            raise FileNotFoundError(f"V11 VecNormalize statistics not found: {norm_path}")
+        vec_env = VecNormalize.load(
+            str(norm_path), VecMonitor(DummyVecEnv([_make_env(env_config, seed)]))
+        )
+        vec_env.training = False
+        vec_env.norm_reward = False
         model = MaskablePPO.load(
             str(path), env=vec_env, device="cpu", tensorboard_log=None,
             custom_objects=custom_policy_objects(),
@@ -168,7 +171,8 @@ def evaluate_checkpoints(
             raise TypeError(f"V11 checkpoint is not MaskablePPO: {path}")
         for eval_seed in pending_seeds:
             episode = _evaluate_one(model, vec_env, 1, eval_seed)[0]
-            episode.update({"checkpoint_step": step, "checkpoint": path.name})
+            episode.update({"checkpoint_step": step, "checkpoint": path.name,
+                            "vec_normalize_checkpoint": norm_path.name})
             results.append(episode)
             results_path.write_text(json.dumps(results, indent=2), encoding="utf-8")
             try:
@@ -183,9 +187,8 @@ def evaluate_checkpoints(
         survive = float(np.mean([row["survived_to_time_limit"] for row in this_checkpoint]))
         print(f"[V11 eval {step:>10,}] peak={mean_peak:7.1f} final={mean_final:7.1f} survival={survive:.0%}")
         del model
+        vec_env.close()
         gc.collect()
-
-    vec_env.close()
     return results
 
 

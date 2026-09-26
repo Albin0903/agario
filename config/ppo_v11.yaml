@@ -38,7 +38,10 @@ self_play:
   pfsp_power: 1.5
 
 logging:
-  metrics_interval_steps: 25000
+  metrics_interval_steps: 100000
   drive_sync_interval_seconds: 300
   checkpoint_interval_steps: 250000
+  evaluation_interval_steps: 1000000
+  evaluation_episodes_per_scenario: 5
+  split_kill_horizon_steps: 30
   output_dir: checkpoints/v11

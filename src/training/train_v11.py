@@ -19,6 +19,10 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.training.hardware import configure_worker_thread_limits, effective_cpu_count
+
+configure_worker_thread_limits()
+
 import torch
 import yaml
 # V11 stores concise JSONL metrics and does not use event files. Prevent SB3's
@@ -66,25 +70,78 @@ def _args() -> argparse.Namespace:
 def _restore_drive_files(save_dir: Path, history_dir: Path, backup_dir: Path) -> None:
     save_dir.mkdir(parents=True, exist_ok=True)
     history_dir.mkdir(parents=True, exist_ok=True)
-    for step_checkpoint in backup_dir.glob("ppo_step_*.zip"):
-        target = save_dir / step_checkpoint.name
-        if not target.exists():
-            shutil.copy2(step_checkpoint, target)
-    for name in ("ppo_latest.zip", "vec_normalize.pkl", "v11_manifest.json", "metrics.jsonl"):
+    for name in (
+        "ppo_latest.zip", "vec_normalize.pkl", "v11_manifest.json", "metrics.jsonl",
+        "scenario_evaluations.jsonl",
+    ):
         source = backup_dir / name
         target = save_dir / name
         if source.is_file() and not target.exists():
             shutil.copy2(source, target)
+    manifest_path = save_dir / "v11_manifest.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for key in ("step_checkpoint", "vec_normalize_checkpoint"):
+                name = manifest.get(key)
+                if name:
+                    source = backup_dir / Path(name).name
+                    target = save_dir / Path(name).name
+                    if source.is_file() and not target.exists():
+                        shutil.copy2(source, target)
+        except (OSError, ValueError, TypeError):
+            pass
     pool_state = backup_dir / "pool_state.json"
     if pool_state.is_file() and not (history_dir / pool_state.name).exists():
         shutil.copy2(pool_state, history_dir / pool_state.name)
 
+    # Only fetch immutable checkpoints needed for the active league and resume.
+    # Copying every historical archive from Drive can waste minutes and disk.
+    required: set[str] = set()
+    manifest_path = save_dir / "v11_manifest.json"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("step_checkpoint"):
+            required.add(Path(manifest["step_checkpoint"]).name)
+    except (OSError, ValueError, TypeError):
+        pass
+    if pool_state.is_file():
+        try:
+            entries = json.loads(pool_state.read_text(encoding="utf-8"))
+            required.update(
+                Path(str(entry.get("path", ""))).name
+                for entry in entries
+                if str(entry.get("path", "")).endswith(".zip")
+            )
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+    if not required:
+        checkpoints = sorted(
+            backup_dir.glob("ppo_step_*.zip"),
+            key=lambda path: int(path.stem.rsplit("_", 1)[-1]) if path.stem.rsplit("_", 1)[-1].isdigit() else -1,
+        )
+        required.update(path.name for path in checkpoints[-20:])
+    for name in required:
+        source, target = backup_dir / name, save_dir / name
+        if source.is_file() and not target.exists():
+            shutil.copy2(source, target)
+
 
 def _resolve_v11_checkpoint(arg: str, save_dir: Path, backup_dir: Path | None) -> Path:
     if arg.lower() == "auto":
-        candidates = [save_dir / "ppo_latest.zip"]
-        if backup_dir:
-            candidates.append(backup_dir / "ppo_latest.zip")
+        candidates = []
+        for folder in (save_dir, backup_dir):
+            if not folder:
+                continue
+            manifest_path = folder / "v11_manifest.json"
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                step_name = manifest.get("step_checkpoint")
+                if step_name:
+                    candidates.append(folder / Path(step_name).name)
+            except (OSError, ValueError, TypeError):
+                pass
+            candidates.append(folder / "ppo_latest.zip")
         for path in candidates:
             if path.is_file() and path.stat().st_size > 1024:
                 return path
@@ -122,6 +179,9 @@ def main() -> None:
 
     if args.n_envs < 1:
         raise ValueError("--n-envs must be at least 1")
+    cpu_budget = effective_cpu_count()
+    if args.n_envs > cpu_budget:
+        print(f"[V11 hardware] warning: n_envs={args.n_envs} exceeds available CPU budget={cpu_budget}")
     n_steps = int(args.n_steps or ppo.get("n_steps", 2048))
     batch_size = int(args.batch_size or ppo.get("batch_size", 1024))
     n_epochs = int(args.n_epochs or ppo.get("n_epochs", 8))
@@ -173,6 +233,10 @@ def main() -> None:
     if device == "auto":
         device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.set_num_threads(1)
+    try:
+        torch.set_num_interop_threads(1)
+    except RuntimeError:
+        pass
     if device.startswith("cuda") and torch.cuda.is_available():
         torch.set_float32_matmul_precision("high")
 
@@ -186,6 +250,9 @@ def main() -> None:
         seed=args.seed,
         device="cpu",
         verbose=0,
+        checkpoint_dirs=[str(save_dir)],
+        preload_models=False,
+        max_cached_models=max(2, args.max_rivals * 2),
     )
     pool.sync_from_disk()
 
@@ -201,10 +268,17 @@ def main() -> None:
 
     norm_path = save_dir / "vec_normalize.pkl"
     if resume_path:
-        if backup_dir and not norm_path.exists() and (backup_dir / norm_path.name).exists():
-            shutil.copy2(backup_dir / norm_path.name, norm_path)
+        norm_name = (
+            manifest.get("vec_normalize_checkpoint") or manifest.get("vec_normalize")
+            or "vec_normalize.pkl"
+        )
+        norm_path = save_dir / Path(norm_name).name
+        if not norm_path.exists() and backup_dir:
+            drive_norm = backup_dir / norm_path.name
+            if drive_norm.is_file():
+                shutil.copy2(drive_norm, norm_path)
         if not norm_path.exists():
-            raise FileNotFoundError("V11 resume requires its vec_normalize.pkl state")
+            raise FileNotFoundError(f"V11 resume requires its VecNormalize state: {norm_path.name}")
         vec_env = VecNormalize.load(str(norm_path), vec_env)
         vec_env.training = True
         vec_env.norm_reward = bool(ppo.get("reward_normalization", True))
@@ -222,6 +296,14 @@ def main() -> None:
     policy_kwargs = build_policy_kwargs(ppo_cfg)
     if resume_path:
         model = _load_custom_v11(resume_path, vec_env, device)
+        expected_step = int(manifest["timesteps"])
+        actual_step = int(model.num_timesteps)
+        if actual_step != expected_step:
+            vec_env.close()
+            raise ValueError(
+                f"V11 manifest says step {expected_step:,}, but checkpoint {resume_path.name} "
+                f"stores {actual_step:,}. Refusing an ambiguous resume."
+            )
         model.batch_size = batch_size
         model.n_epochs = n_epochs
     else:
@@ -254,7 +336,8 @@ def main() -> None:
 
     print(
         f"[V11] device={device} envs={args.n_envs} rollout={n_steps}×{args.n_envs} "
-        f"batch={batch_size} epochs={n_epochs} target={total_timesteps:,}"
+        f"batch={batch_size} epochs={n_epochs} target={total_timesteps:,}; "
+        f"CPU budget={cpu_budget}, env-worker/BLAS/Numba thread caps=1"
     )
     callback = V11TrainingCallback(
         pool=pool,
@@ -262,8 +345,11 @@ def main() -> None:
         backup_dir=str(backup_dir) if backup_dir else None,
         config=ppo_cfg,
         source_v10=source_v10,
-        metric_interval=int(logging_cfg.get("metrics_interval_steps", 25_000)),
+        metric_interval=int(logging_cfg.get("metrics_interval_steps", 100_000)),
         checkpoint_interval=int(logging_cfg.get("checkpoint_interval_steps", 250_000)),
+        evaluation_interval=int(logging_cfg.get("evaluation_interval_steps", 1_000_000)),
+        evaluation_episodes=int(logging_cfg.get("evaluation_episodes_per_scenario", 5)),
+        split_kill_horizon=int(logging_cfg.get("split_kill_horizon_steps", 30)),
         pool_update_interval=int(self_play_cfg.get("update_interval_steps", 250_000)),
         min_pool_step=int(self_play_cfg.get("min_pool_step", 200_000)),
         drive_sync_seconds=float(logging_cfg.get("drive_sync_interval_seconds", 300.0)),
@@ -271,9 +357,23 @@ def main() -> None:
     start = int(model.num_timesteps)
     callback.last_checkpoint = start
     callback.last_pool_update = start
+    callback.last_metric_step = start
     callback.next_metric = ((start // callback.metric_interval) + 1) * callback.metric_interval
+    callback.next_evaluation = ((start // callback.evaluation_interval) + 1) * callback.evaluation_interval
+    callback.prepare_resume(start)
     if start >= total_timesteps:
         print(f"[V11] checkpoint already reached target ({start:,}/{total_timesteps:,})")
+        callback.model = model
+        if callback.resume_evaluation_milestone:
+            milestone = callback.resume_evaluation_milestone
+            callback.save_and_sync()
+            try:
+                if not callback._run_scenario_evaluation(start, milestone):
+                    raise RuntimeError(f"Could not complete evaluation for milestone {milestone:,}.")
+            finally:
+                callback.save_and_sync()
+                vec_env.close()
+            return
         callback.save_and_sync()
         vec_env.close()
         return

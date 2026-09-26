@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from typing import Any, Callable, Optional
 
+from src.training.hardware import configure_worker_thread_limits
+
+configure_worker_thread_limits()
+
 import numpy as np
 
 from src.env.gym_wrapper import AgarEnv
@@ -19,9 +23,6 @@ def make_env_fn(
 ) -> Callable[[], AgarEnv]:
     """Build a picklable factory with cached actions and sparse pool refreshes."""
     def _init() -> AgarEnv:
-        import torch
-
-        torch.set_num_threads(1)
         bot_opponents: dict[int, Any] = {}
         bot_cached_actions: dict[int, np.ndarray] = {}
         step_counters: dict[int, int] = {}
@@ -35,7 +36,7 @@ def make_env_fn(
                 and dummy_env.current_step - last_sync[0] >= 20_000
             ):
                 last_sync[0] = dummy_env.current_step
-                pool.sync_from_disk()
+                pool.sync_from_disk(persist_state=False)
 
             current_step = step_counters.get(bot_id, 0)
             step_counters[bot_id] = current_step + 1
@@ -45,7 +46,7 @@ def make_env_fn(
                     bot_cached_actions.pop(bot_id, None)
 
                 opponent = bot_opponents.get(bot_id)
-                if opponent is not None and opponent.policy is not None and dummy_env is not None:
+                if opponent is not None and dummy_env is not None:
                     if bot_id in bot_cached_actions and current_step % 4 != 0:
                         return bot_cached_actions[bot_id]
                     obs = dummy_env._build_observation(player_id=bot_id)
