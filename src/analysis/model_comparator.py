@@ -19,6 +19,7 @@ import glob
 import re
 import math
 import argparse
+import json
 from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import matplotlib.pyplot as plt
@@ -34,10 +35,18 @@ from src.training.policy_arch import load_trained_model, predict_action
 def extract_step(path: str) -> int:
     """Extract step integer from checkpoint filename."""
     fname = os.path.basename(path)
-    if "final" in fname:
-        return 999_999_999
     m = re.search(r"step_(\d+)", fname)
-    return int(m.group(1)) if m else 0
+    if m:
+        return int(m.group(1))
+    if fname in ("ppo_final.zip", "ppo_latest.zip", "ppo_last.zip"):
+        manifest = os.path.join(os.path.dirname(path), "v10_manifest.json")
+        if os.path.exists(manifest):
+            try:
+                with open(manifest, encoding="utf-8") as handle:
+                    return int(json.load(handle).get("timesteps", 0))
+            except (OSError, ValueError, TypeError):
+                pass
+    return 0
 
 
 def benchmark_engine_speed(env: AgarEnv, num_steps: int = 1500) -> Dict[str, float]:

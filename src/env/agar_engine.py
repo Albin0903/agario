@@ -696,7 +696,7 @@ class AgarEngine:
                 cell.mass = max(100.0, cell.mass - decay)
 
         if profiling:
-            self.last_profile["movement"] = time.perf_counter() - phase_started
+            self.last_profile["targets_movement"] = time.perf_counter() - phase_started
             phase_started = time.perf_counter()
 
         # Centroid attraction: only active if split subcells exist
@@ -749,6 +749,10 @@ class AgarEngine:
             self._cells_mass_buf[i] = cell.mass
             self._cells_r_buf[i] = r
 
+        if profiling:
+            self.last_profile["integration_centroids"] = time.perf_counter() - phase_started
+            phase_started = time.perf_counter()
+
         n = len(self.cells)
         compute_centroids_numba(
             n,
@@ -767,10 +771,6 @@ class AgarEngine:
                     float(self._player_cent_arr[pid, 1]),
                     float(self._player_cent_arr[pid, 2]),
                 )
-
-        if profiling:
-            self.last_profile["integration"] = time.perf_counter() - phase_started
-            phase_started = time.perf_counter()
 
         # 3. Update ejected mass movements (with authentic wall bounce)
         if self.ejected:
@@ -874,10 +874,6 @@ class AgarEngine:
                     r_j = cj.radius
                     r_sum = r_i + r_j
 
-                    dist = math.sqrt(max(1e-6, dist_sq))
-                    inv_d = 1.0 / dist
-                    nx = dx * inv_d
-                    ny = dy * inv_d
                     w = self.width
                     h = self.height
 
@@ -891,14 +887,18 @@ class AgarEngine:
                             r_large = r_j
 
                         # Deep penetration absorption: center of smaller cell must enter inside the boundary of larger cell
-                        if dist < r_large:
+                        if dist_sq < r_large * r_large:
                             c_large.mass += c_small.mass
                             merged_ids.add(c_small.id)
                             if c_small is ci:
                                 break
                             continue
-                        elif dist < r_sum * 1.5:
+                        elif dist_sq < (r_sum * 1.5) ** 2:
                             # Gentle mass-weighted mutual attraction: smaller cell accelerates much faster towards larger cell
+                            dist = math.sqrt(max(1e-6, dist_sq))
+                            inv_d = 1.0 / dist
+                            nx = dx * inv_d
+                            ny = dy * inv_d
                             total_m = ci.mass + cj.mass
                             pull_mag = min(3.0, max(0.4, (r_sum * 1.5 - dist) * 0.10))
                             pull_i = pull_mag * (cj.mass / total_m)
@@ -909,8 +909,12 @@ class AgarEngine:
                             cj.y = max(r_j, min(h - r_j, cj.y - ny * pull_j))
                     else:
                         # Elastic rigid push apart to maintain separation while unmerged
-                        overlap = r_sum - dist
-                        if overlap > 0:
+                        if dist_sq < r_sum * r_sum:
+                            dist = math.sqrt(max(1e-6, dist_sq))
+                            inv_d = 1.0 / dist
+                            nx = dx * inv_d
+                            ny = dy * inv_d
+                            overlap = r_sum - dist
                             total_m = max(1e-4, ci.mass + cj.mass)
                             ratio_i = cj.mass / total_m
                             ratio_j = ci.mass / total_m

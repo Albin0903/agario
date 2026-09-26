@@ -17,6 +17,9 @@ import os
 import sys
 import math
 import argparse
+import glob
+import json
+import re
 from typing import Dict, Any, List, Tuple
 import numpy as np
 import yaml
@@ -32,7 +35,8 @@ if hasattr(sys.stdout, "reconfigure"):
     except Exception:
         pass
 
-from src.env.gym_wrapper import AgarEnv, mass_to_radius
+from src.env.gym_wrapper import AgarEnv
+from src.env.entities import mass_to_radius
 from src.training.policy_arch import load_trained_model, predict_action
 
 
@@ -43,22 +47,53 @@ def load_yaml(path: str) -> Dict[str, Any]:
     return {}
 
 
-def get_policy_action_probs(model, obs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-    """Query actor head to extract probability distributions for angles (24) and triggers (3)."""
+def _synthetic_mask(env: AgarEnv | None, *, allow_split: bool) -> np.ndarray | None:
+    """Construit un masque plat [angles | triggers] pour une obs synthétique.
+
+    MaskablePPO exige un masque de taille ``num_angles + 3``. Sans env, on
+    suppose 24 angles (config V10). En inspection, on autorise le split afin
+    de mesurer l'instinct de chasse ; le masquage "réel" reste évalué en match.
+    """
+    n_angles = env.num_angles if env is not None else 24
+    mask = np.ones(n_angles + 3, dtype=np.bool_)
+    mask[n_angles + 1] = bool(allow_split)
+    return mask
+
+
+def get_policy_action_probs(
+    model, obs: np.ndarray, action_masks: np.ndarray | None = None
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Query actor head to extract probability distributions for angles (24) and triggers (3).
+
+    Compatible V10 (MaskablePPO → ``dist.distributions`` + ``action_masks``
+    obligatoire) et legacy PPO (``dist.distribution``). Sans masque sur une
+    politique masquable, ``get_distribution`` lèverait une erreur de shape ;
+    on demande donc toujours un masque (split autorisé par défaut en sonde).
+    """
+    masks = action_masks
+    if masks is None:
+        masks = np.ones(int(np.prod(model.action_space.nvec)), dtype=np.bool_)
+    # sb3-contrib MaskablePPO exige un batch de masques (n_envs, n_actions).
+    masks_batch = np.asarray(masks, dtype=np.bool_).reshape(1, -1)
     with torch.no_grad():
         obs_tensor = torch.as_tensor(obs, device=model.device).float().unsqueeze(0)
-        dist = model.policy.get_distribution(obs_tensor)
+        try:
+            dist = model.policy.get_distribution(obs_tensor, action_masks=masks_batch)
+        except TypeError:
+            # Politique PPO legacy : pas de support des masques.
+            dist = model.policy.get_distribution(obs_tensor)
 
-        # MultiCategorical distribution has multiple categorical sub-distributions
-        if hasattr(dist, "distribution"):
-            sub_dists = dist.distribution
-            angle_probs = sub_dists[0].probs.cpu().numpy()[0]
-            trig_probs = sub_dists[1].probs.cpu().numpy()[0]
+        sub_dists = getattr(dist, "distributions", None)  # MaskablePPO (V10)
+        if sub_dists is None:
+            sub_dists = getattr(dist, "distribution", None)  # PPO legacy
+        if sub_dists is not None:
+            angle_probs = sub_dists[0].probs.detach().cpu().numpy()[0]
+            trig_probs = sub_dists[1].probs.detach().cpu().numpy()[0]
         else:
             # Fallback for continuous or other heads
             angle_probs = np.ones(24) / 24.0
             trig_probs = np.array([1.0, 0.0, 0.0])
-    return angle_probs, trig_probs
+    return np.asarray(angle_probs, dtype=np.float64), np.asarray(trig_probs, dtype=np.float64)
 
 
 def probe_synthetic_scenarios(model, env: AgarEnv):
@@ -74,7 +109,9 @@ def probe_synthetic_scenarios(model, env: AgarEnv):
     obs_food[4] = 1.0  # u_x
     obs_food[5] = 0.0  # u_y
 
-    a_probs, t_probs = get_policy_action_probs(model, obs_food)
+    a_probs, t_probs = get_policy_action_probs(
+        model, obs_food, action_masks=_synthetic_mask(env, allow_split=True)
+    )
     best_ang_idx = int(np.argmax(a_probs))
     best_ang_deg = best_ang_idx * 15.0
     print(f"🍏 Scenario A: Food Foraging (Pellet directly at 0°)")
@@ -90,7 +127,9 @@ def probe_synthetic_scenarios(model, env: AgarEnv):
     obs_pred[46] = float(np.tanh(math.log(350.0 / 50.0)))  # threat level ~0.96
     obs_pred[47] = 0.0
 
-    a_probs, t_probs = get_policy_action_probs(model, obs_pred)
+    a_probs, t_probs = get_policy_action_probs(
+        model, obs_pred, action_masks=_synthetic_mask(env, allow_split=True)
+    )
     best_ang_idx = int(np.argmax(a_probs))
     best_ang_deg = best_ang_idx * 15.0
     print(f"\n🚨 Scenario B1: Lethal Predator Threat (Huge predator at 0°, 150m ahead, 7.0x mass)")
@@ -106,7 +145,9 @@ def probe_synthetic_scenarios(model, env: AgarEnv):
     obs_rival[46] = float(np.tanh(math.log(60.0 / 50.0)))  # harmless rival ~0.18
     obs_rival[47] = 0.0
 
-    a_probs_r, t_probs_r = get_policy_action_probs(model, obs_rival)
+    a_probs_r, t_probs_r = get_policy_action_probs(
+        model, obs_rival, action_masks=_synthetic_mask(env, allow_split=True)
+    )
     best_ang_idx_r = int(np.argmax(a_probs_r))
     best_ang_deg_r = best_ang_idx_r * 15.0
     print(f"\n🛡️ Scenario B2: Harmless Rival (Enemy 1.2x mass at 0°, cannot split-kill)")
@@ -122,7 +163,9 @@ def probe_synthetic_scenarios(model, env: AgarEnv):
     obs_prey[26] = float(np.tanh(math.log(50.0 / 120.0)))  # edible prey ~ -0.71
     obs_prey[27] = 0.0
 
-    a_probs, t_probs = get_policy_action_probs(model, obs_prey)
+    a_probs, t_probs = get_policy_action_probs(
+        model, obs_prey, action_masks=_synthetic_mask(env, allow_split=True)
+    )
     best_ang_idx = int(np.argmax(a_probs))
     best_ang_deg = best_ang_idx * 15.0
     print(f"\n🎯 Scenario C: Prey Opportunity (Small prey at 0°, distance 120 in strike zone, split viable)")
@@ -140,7 +183,9 @@ def probe_synthetic_scenarios(model, env: AgarEnv):
     obs_split[3] = 4.0 / 16.0  # 4 subcells active!
     obs_split[83] = 100.0 / 300.0  # remerge cooldown remaining
 
-    a_probs, t_probs = get_policy_action_probs(model, obs_split)
+    a_probs, t_probs = get_policy_action_probs(
+        model, obs_split, action_masks=_synthetic_mask(env, allow_split=True)
+    )
     print(f"\n🧩 Scenario D: Multi-Cell State (4 subcells currently split)")
     print(f"   - Additional Split Probability: {t_probs[1]*100:.2f}%")
     print(f"   - Idle / Move Probability:     {t_probs[0]*100:.2f}%")
@@ -245,6 +290,48 @@ def probe_live_simulation(model, env: AgarEnv, num_steps: int = 1500):
     print(f"   - Real-Time Acceleration:    ~{eval_fps/30.0:.1f}x real-time (at 30 FPS tick rate)")
 
 
+def _resolve_model_path(cli_value: str | None) -> str | None:
+    """Résout --model en ignorant le placeholder non substitué "{LATEST_MODEL}".
+
+    Dans Colab, ``!python ... --model "{LATEST_MODEL}"`` repose sur la
+    substitution ``{var}`` d'IPython. Si elle n'a pas lieu (ou si le chemin
+    n'existe pas), on bascule sur la détection V10 → V5 → checkpoints locaux.
+    """
+    if cli_value and cli_value != "{LATEST_MODEL}" and os.path.exists(cli_value):
+        return cli_value
+    if cli_value and cli_value not in ("{LATEST_MODEL}",) and not os.path.exists(cli_value):
+        print(f"⚠️ Checkpoint introuvable : {cli_value} — recherche automatique…")
+
+    candidates = []
+    for version in ("v10", "v9", "v8", "v7", "v6", "v5"):
+        candidates.extend(glob.glob(f"/content/drive/MyDrive/agario_rl_backup_{version}/*.zip"))
+    candidates.extend(glob.glob("checkpoints/ppo/*.zip"))
+    candidates.extend(sorted(glob.glob("checkpoints/self_play_pool/*.zip")))
+    valid = [
+        c for c in candidates
+        if os.path.isfile(c) and os.path.getsize(c) > 1000
+        and not os.path.basename(c).startswith("._")
+        and "bc_pretrained" not in os.path.basename(c)
+    ]
+    def candidate_key(path: str) -> tuple[int, int]:
+        name = os.path.basename(path)
+        match = re.search(r"step_(\d+)", name)
+        if match:
+            return (int(match.group(1)), 1)
+        manifest_path = os.path.join(os.path.dirname(path), "v10_manifest.json")
+        if name in ("ppo_latest.zip", "ppo_last.zip", "ppo_final.zip") and os.path.exists(manifest_path):
+            try:
+                with open(manifest_path, encoding="utf-8") as handle:
+                    return (int(json.load(handle).get("timesteps", 0)), 1)
+            except (OSError, ValueError, TypeError):
+                pass
+        return (0, 0)
+    def version_rank(path: str) -> int:
+        match = re.search(r"backup_v(\d+)", path)
+        return int(match.group(1)) if match else 0
+    return max(valid, key=lambda path: (*candidate_key(path), version_rank(path))) if valid else None
+
+
 def main():
     parser = argparse.ArgumentParser(description="AGAR-RL Policy Inspector & Diagnostic Tool")
     parser.add_argument("--model", type=str, default=None, help="Path to PPO model .zip")
@@ -252,19 +339,8 @@ def main():
     parser.add_argument("--steps", type=int, default=1500, help="Live simulation steps")
     args = parser.parse_args()
 
-    # Auto-detect checkpoint if not provided
-    model_path = args.model
-    if not model_path or not os.path.exists(model_path):
-        candidates = [
-            "/content/drive/MyDrive/agario_rl_backup_v5/ppo_latest.zip",
-            "checkpoints/ppo/ppo_latest.zip",
-            "checkpoints/ppo/ppo_final.zip",
-            "checkpoints/ppo/ppo_bc_pretrained.zip",
-        ]
-        import glob
-        candidates.extend(glob.glob("/content/drive/MyDrive/agario_rl_backup_v5/*.zip"))
-        candidates.extend(glob.glob("checkpoints/self_play_pool/*.zip"))
-        model_path = next((c for c in candidates if os.path.exists(c)), None)
+    # Auto-detect checkpoint if not provided (support V10 Drive + placeholder Colab)
+    model_path = _resolve_model_path(args.model)
 
     if not model_path or not os.path.exists(model_path):
         print("❌ Error: No valid checkpoint found. Please specify --model <path>")
@@ -279,6 +355,7 @@ def main():
     env = AgarEnv(config=env_cfg, seed=42)
 
     model = load_trained_model(model_path, device="cpu")
+    print(f"   Policy: {type(model).__name__} / {type(model.policy).__name__}")
 
     probe_synthetic_scenarios(model, env)
     probe_live_simulation(model, env, num_steps=args.steps)

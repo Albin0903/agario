@@ -22,7 +22,7 @@ class SelfPlayCallback(BaseCallback):
         pool: SelfPlayPool,
         update_interval_steps: int = 500_000,
         save_dir: str = "checkpoints/ppo",
-        log_interval_steps: int = 10_000,
+        log_interval_steps: int = 25_000,
         min_pool_step: int = 200_000,
         backup_dir: Optional[str] = None,
         ent_coef_start: float = 0.005,
@@ -39,6 +39,8 @@ class SelfPlayCallback(BaseCallback):
         self.ent_coef_start = float(ent_coef_start)
         self.ent_coef_end = float(ent_coef_end)
         self.started_at = time.perf_counter()
+        self._last_drive_sync = self.started_at
+        self.drive_sync_interval = 60.0
 
         self.last_pool_update = 0
         self.last_log_step = 0
@@ -210,6 +212,40 @@ class SelfPlayCallback(BaseCallback):
                 if self.verbose > 0:
                     print(f"[SelfPlayCallback] Skipping pool entry (warm-up phase until step {self.min_pool_step:,})")
 
+        if self.backup_dir and (self.num_timesteps == 0 or time.perf_counter() - self._last_drive_sync >= self.drive_sync_interval):
+            try:
+                os.makedirs(self.backup_dir, exist_ok=True)
+                latest_path = os.path.join(self.save_dir, "ppo_latest.zip")
+                last_path = os.path.join(self.save_dir, "ppo_last.zip")
+                manifest_path = os.path.join(self.save_dir, "v10_manifest.json")
+                vn_path = os.path.join(self.save_dir, "vec_normalize.pkl")
+                vec_norm = getattr(self.model, "get_vec_normalize_env", lambda: None)()
+                if vec_norm is not None:
+                    vec_norm.save(vn_path)
+                self.model.save(latest_path)
+                self.model.save(last_path)
+                manifest = {
+                    "version": "v10",
+                    "timesteps": int(self.num_timesteps),
+                    "checkpoint": "ppo_last.zip",
+                    "vec_normalize": "vec_normalize.pkl",
+                    "pool_state": "pool_state.json",
+                    "seed": getattr(self.model, "seed", None),
+                    "git_revision": self._git_revision(),
+                }
+                temporary_manifest = f"{manifest_path}.tmp"
+                with open(temporary_manifest, "w", encoding="utf-8") as handle:
+                    json.dump(manifest, handle, indent=2)
+                os.replace(temporary_manifest, manifest_path)
+                self._mirror_file(latest_path, os.path.join(self.backup_dir, "ppo_latest.zip"))
+                self._mirror_file(last_path, os.path.join(self.backup_dir, "ppo_last.zip"))
+                self._mirror_file(manifest_path, os.path.join(self.backup_dir, "v10_manifest.json"))
+                if vec_norm is not None:
+                    self._mirror_file(vn_path, os.path.join(self.backup_dir, "vec_normalize.pkl"))
+                self._last_drive_sync = time.perf_counter()
+                print(f"📁 [Drive Backup] Latest progress mirrored at step {self.num_timesteps:,}")
+            except Exception as e:
+                print(f"⚠️ [Drive Backup] Warning: periodic progress sync failed: {e}")
         return True
 
     @staticmethod
@@ -242,6 +278,7 @@ class ProfilingCallback(BaseCallback):
         self.rollout_duration = 0.0
         self.train_duration = 0.0
         self.iteration = 0
+        self.report_every = 10
 
     def _on_training_start(self) -> None:
         self.last_time = time.perf_counter()
@@ -250,10 +287,11 @@ class ProfilingCallback(BaseCallback):
     def _on_rollout_start(self) -> None:
         if self.train_start > 0.0 and self.rollout_duration > 0.0:
             self.iteration += 1
-            n_steps = getattr(self.model, "n_steps", 2048)
-            n_envs = getattr(self.training_env, "num_envs", 8)
-            total_steps_batch = n_steps * n_envs
-            self.log_timing_summary(total_steps_batch)
+            if self.iteration % self.report_every == 0:
+                n_steps = getattr(self.model, "n_steps", 2048)
+                n_envs = getattr(self.training_env, "num_envs", 8)
+                total_steps_batch = n_steps * n_envs
+                self.log_timing_summary(total_steps_batch)
         self.rollout_start = time.perf_counter()
 
     def _on_rollout_end(self) -> None:

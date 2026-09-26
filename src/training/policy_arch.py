@@ -190,13 +190,39 @@ def build_policy_kwargs(ppo_cfg: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _v10_custom_objects() -> Dict[str, Any]:
+    """Classes custom à injecter au chargement d'un checkpoint V10 MaskablePPO.
+
+    SB3 sérialise la classe de politique par référence ; sans `custom_objects`,
+    `MaskablePPO.load()` échoue avec `Policy must subclass
+    MaskableActorCriticPolicy` dès que le checkpoint a été sauvé avec
+    `LayerNormMaskablePolicy`.
+    """
+    objects: Dict[str, Any] = {
+        "policy_class": LayerNormMaskablePolicy,
+        "features_extractor_class": LayerNormExtractor,
+    }
+    try:
+        from stable_baselines3.common.policies import ActorCriticPolicy  # noqa: F401
+        from sb3_contrib.common.maskable.policies import MaskableActorCriticPolicy  # noqa: F401
+
+        objects.setdefault("base_policy_class", MaskableActorCriticPolicy)
+    except Exception:
+        pass
+    return objects
+
+
 def load_trained_model(path: str, allow_legacy: bool = True, **kwargs):
     """Load MaskablePPO, optionally allowing legacy vanilla PPO checkpoints."""
     last_error: Optional[Exception] = None
     try:
         from sb3_contrib import MaskablePPO
 
-        return MaskablePPO.load(path, **kwargs)
+        # D'abord avec les classes V10 (LayerNorm), sinon chargement standard.
+        try:
+            return MaskablePPO.load(path, custom_objects=_v10_custom_objects(), **kwargs)
+        except Exception:
+            return MaskablePPO.load(path, **kwargs)
     except Exception as exc:
         last_error = exc
     if not allow_legacy:

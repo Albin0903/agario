@@ -1,13 +1,13 @@
 # AGAR-RL PPO & Self-Play Configuration
-# High-Throughput NVIDIA A100 Configuration
+# Safe defaults; the Colab notebook benchmarks GPU-specific n_envs/batch_size profiles.
 
 ppo:
   learning_rate: 0.0003
   learning_rate_end: 0.00001    # Cosine annealing floor (3e-4 -> 1e-5)
   lr_schedule: cosine
   n_steps: 2048                 # Horizon per worker = 2048 (Guide Section 6)
-  batch_size: 1024              # Best measured Colab A100 profile
-  n_epochs: 10                  # More reuse of the large A100 rollout
+  batch_size: 1024              # Benchmark candidates: L4 512-1024, A100 1024-2048
+  n_epochs: 8                   # Avoid over-updating PPO on CPU-bound rollout workloads
   gamma: 0.99                   # Discount factor for long-term survival
   gae_lambda: 0.95
   clip_range: 0.2
@@ -38,7 +38,7 @@ self_play:
   pfsp_power: 1.5                 # Difficulty weighting exponent in [1, 2]
 
 training:
-  n_envs: 8                     # Best measured profile; more workers reduce throughput
+  n_envs: 8                     # Conservative default; notebook selects a measured profile
   eval_freq: 25000
   eval_episodes: 5
   seed: 42

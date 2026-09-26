@@ -120,7 +120,9 @@ def parse_args():
     parser = argparse.ArgumentParser(description="AGAR-RL Distributed Self-Play Training")
     parser.add_argument("--n-envs", "--num-envs", dest="n_envs", type=int, default=24, help="Number of parallel environments (default: 24 for GPU L4)")
     parser.add_argument("--total-timesteps", "--total-steps", dest="total_timesteps", type=int, default=15_000_000, help="Total training steps")
-    parser.add_argument("--batch-size", type=int, default=1024, help="PPO mini-batch size (default: 1024 for GPU L4)")
+    parser.add_argument("--additional-timesteps", action="store_true", help="Treat --total-timesteps as steps to add after a resumed checkpoint")
+    parser.add_argument("--batch-size", type=int, default=None, help="PPO mini-batch size (defaults to config value)")
+    parser.add_argument("--n-epochs", type=int, default=None, help="PPO update epochs (defaults to config value)")
     parser.add_argument("--n-steps", type=int, default=2048, help="Steps per rollout per env")
     parser.add_argument("--learning-rate", type=float, default=3e-4, help="Learning rate")
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor")
@@ -136,11 +138,14 @@ def parse_args():
     parser.add_argument("--use-dummy-vec", action="store_true", help="Force DummyVecEnv instead of SubprocVecEnv")
     parser.add_argument("--resume", type=str, default=None, help="Path to checkpoint .zip to resume from, or 'auto'")
     parser.add_argument("--fresh", action="store_true", help="Force starting from scratch (wipe local & drive checkpoints and start clean at step 0)")
-    parser.add_argument("--max-rivals", type=int, default=2, help="Max neural rival bots per env (default: 2, top 10% league; rest use microsecond Numba)")
+    parser.add_argument("--max-rivals", type=int, default=2, help="Max neural rival bots per env (default: 2 neural rivals; rest use microsecond Numba)")
     parser.add_argument("--warm-start", action="store_true", default=True, help="Warm-start policy network via behavioral cloning on HeuristicBot")
     parser.add_argument("--no-warm-start", action="store_false", dest="warm_start", help="Disable BC warm-start")
     parser.add_argument("--min-pool-step", type=int, default=200_000, help="Minimum step before expanding self-play pool")
     parser.add_argument("--backup-dir", type=str, default=None, help="Directory to mirror checkpoints to (e.g. Google Drive)")
+    parser.add_argument("--log-level", choices=("quiet", "normal", "verbose"), default="normal", help="Training log verbosity")
+    parser.add_argument("--profile-run", action="store_true", help="Print one machine-readable throughput line for profile selection")
+    parser.add_argument("--log-interval", type=int, default=25_000, help="Steps between concise training metric lines")
     return parser.parse_args()
 
 
@@ -168,7 +173,6 @@ def main():
         # A100 Tensor Cores accelerate these matmuls while preserving the
         # float32 policy/value numerics used by PPO.
         torch.set_float32_matmul_precision("high")
-        torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
     print("=" * 65)
@@ -185,10 +189,18 @@ def main():
     import shutil, glob, re
 
     def extract_step(path: str) -> int:
-        if "final" in os.path.basename(path):
-            return 999_999_999
         m = re.search(r"step_(\d+)", path)
-        return int(m.group(1)) if m else 0
+        if m:
+            return int(m.group(1))
+        manifest = os.path.join(os.path.dirname(path), "v10_manifest.json")
+        if os.path.basename(path) in ("ppo_last.zip", "ppo_latest.zip", "ppo_final.zip") and os.path.exists(manifest):
+            try:
+                import json
+                with open(manifest, encoding="utf-8") as handle:
+                    return int(json.load(handle).get("timesteps", 0))
+            except (OSError, ValueError, TypeError):
+                pass
+        return 0
 
     resume_path = None
     teacher_path = None
@@ -258,7 +270,7 @@ def main():
                     if not os.path.exists(dest):
                         shutil.copy2(dz, dest)
 
-                if resume_path is None and args.resume == "auto":
+                if resume_path is None and args.resume and args.resume.lower() == "auto":
                     drive_zips.sort(key=extract_step, reverse=True)
                     resume_path = drive_zips[0]
                     print(f"🔍 [Auto-Resume] Selected latest Drive checkpoint: {resume_path} (step: {extract_step(resume_path):,})")
@@ -286,6 +298,7 @@ def main():
         pfsp_power=float(ppo_cfg.get("self_play", {}).get("pfsp_power", 1.5)),
         seed=args.seed,
         device="cpu",
+        verbose=2 if args.log_level == "verbose" else 0,
     )
     pool.sync_from_disk()
 
@@ -327,16 +340,17 @@ def main():
     target_kl = float(target_kl) if target_kl is not None else None
     ent_coef = float(ppo_cfg.get("ppo", {}).get("ent_coef", args.ent_coef))
     ent_coef_end = float(ppo_cfg.get("ppo", {}).get("ent_coef_end", 0.001))
-    n_steps = int(ppo_cfg.get("ppo", {}).get("n_steps", args.n_steps))
-    batch_size = int(ppo_cfg.get("ppo", {}).get("batch_size", args.batch_size))
-    n_epochs = int(ppo_cfg.get("ppo", {}).get("n_epochs", 8))
+    n_steps = int(args.n_steps if args.n_steps is not None else ppo_cfg.get("ppo", {}).get("n_steps", 2048))
+    batch_size = int(args.batch_size if args.batch_size is not None else ppo_cfg.get("ppo", {}).get("batch_size", 1024))
+    n_epochs = int(args.n_epochs if args.n_epochs is not None else ppo_cfg.get("ppo", {}).get("n_epochs", 8))
     lr_start = float(ppo_cfg.get("ppo", {}).get("learning_rate", args.learning_rate))
     lr_end = float(ppo_cfg.get("ppo", {}).get("learning_rate_end", 1e-5))
     lr = build_lr_schedule(ppo_cfg, lr_start)
     policy_kwargs = build_policy_kwargs(ppo_cfg)
     print(
         f"  V10: MaskablePPO + {ppo_cfg.get('policy', {}).get('norm', 'layernorm')}(512) "
-        f"+ cosine LR {lr_start:.1e} → {lr_end:.1e}"
+        f"+ cosine LR {lr_start:.1e} → {lr_end:.1e} | "
+        f"rollout={n_steps}×{args.n_envs}, batch={batch_size}, epochs={n_epochs}"
     )
 
     # Check tensorboard availability
@@ -359,8 +373,34 @@ def main():
             )
             if not isinstance(model, MaskablePPO):
                 raise TypeError("checkpoint is vanilla PPO, not MaskablePPO")
+            # Updating PPO's minibatch/epoch knobs is safe on resume; n_steps
+            # remains the serialized value because the rollout buffer was built
+            # with that size during load.
+            if args.batch_size is not None:
+                model.batch_size = batch_size
+            if args.n_epochs is not None:
+                model.n_epochs = n_epochs
             is_resumed = True
+            manifest_path = os.path.join(os.path.dirname(resume_path), "v10_manifest.json")
+            if os.path.exists(manifest_path):
+                try:
+                    import json
+                    with open(manifest_path, encoding="utf-8") as handle:
+                        manifest_step = int(json.load(handle).get("timesteps", model.num_timesteps))
+                    if manifest_step != int(model.num_timesteps):
+                        print(
+                            f"⚠️ Manifest says {manifest_step:,}, checkpoint stores "
+                            f"{model.num_timesteps:,}; using the checkpoint's internal counter."
+                        )
+                except (OSError, ValueError, TypeError):
+                    pass
         except Exception as e:
+            if args.resume and args.resume.lower() not in ("auto", "none", "false", "no"):
+                vec_env.close()
+                raise RuntimeError(
+                    f"Explicit checkpoint '{resume_path}' could not be resumed as V10. "
+                    "No files were overwritten; choose a compatible V10 checkpoint or explicitly configure a teacher warm-start."
+                ) from e
             print(
                 f"⚠️ V10 cannot resume '{resume_path}' ({e}). "
                 "Architecture changed (MaskablePPO + LayerNorm). Starting a fresh V10 run. "
@@ -438,7 +478,7 @@ def main():
                 max_grad_norm=0.5,
                 policy_kwargs=policy_kwargs,
                 tensorboard_log=tb_log,
-                verbose=1,
+                verbose=0 if args.log_level == "quiet" else 1,
                 device=device,
             )
 
@@ -447,43 +487,62 @@ def main():
         pool=pool,
         update_interval_steps=args.pool_interval,
         save_dir=args.save_dir,
-        log_interval_steps=5_000,
+        log_interval_steps=max(args.log_interval, args.n_envs),
         min_pool_step=args.min_pool_step,
         backup_dir=args.backup_dir,
         ent_coef_start=ent_coef,
         ent_coef_end=ent_coef_end,
-        verbose=1,
+        verbose=2 if args.log_level == "verbose" else (0 if args.log_level == "quiet" else 1),
     )
     profiler_callback = ProfilingCallback()
 
-    print(f"\nStarting MaskablePPO optimization loop for {args.total_timesteps:,} timesteps...")
+    start_timesteps = int(getattr(model, "num_timesteps", 0)) if is_resumed else 0
+    requested_target = args.total_timesteps
+    if is_resumed and args.additional_timesteps:
+        requested_target += start_timesteps
+    remaining_timesteps = max(0, requested_target - start_timesteps)
+    training_started = __import__("time").perf_counter()
+    print(
+        f"\nTraining progress: {start_timesteps:,} / {requested_target:,} timesteps "
+        f"({remaining_timesteps:,} remaining; resume={'yes' if is_resumed else 'no'})."
+    )
     try:
-        model.learn(
-            total_timesteps=args.total_timesteps,
-            callback=[self_play_callback, profiler_callback],
-            progress_bar=False,
-            reset_num_timesteps=not is_resumed,
-        )
+        if remaining_timesteps > 0:
+            model.learn(
+                total_timesteps=requested_target,
+                callback=[self_play_callback, profiler_callback],
+                progress_bar=False,
+                reset_num_timesteps=not is_resumed,
+            )
+        else:
+            print("Requested training target is already reached; saving resumed model without another rollout.")
     except KeyboardInterrupt:
         print("\nTraining interrupted by user. Saving current checkpoint...")
+
+    if args.profile_run:
+        elapsed_training = max(1e-6, __import__("time").perf_counter() - training_started)
+        trained_steps = max(0, int(model.num_timesteps) - start_timesteps)
+        print(f"PROFILE_RESULT steps_per_second={trained_steps / elapsed_training:.3f} trained_steps={trained_steps}")
 
     # Save final model
     final_path = os.path.join(args.save_dir, "ppo_final.zip")
     model.save(final_path)
+    last_path = os.path.join(args.save_dir, "ppo_last.zip")
+    model.save(last_path)
     if isinstance(vec_env, VecNormalize):
         vec_env.save(os.path.join(args.save_dir, "vec_normalize.pkl"))
-    print(f"\nTraining complete! Final model saved to: {final_path}")
-
     if args.backup_dir:
-        try:
-            import shutil
-            os.makedirs(args.backup_dir, exist_ok=True)
-            shutil.copy2(final_path, os.path.join(args.backup_dir, "ppo_final.zip"))
-            if isinstance(vec_env, VecNormalize):
-                shutil.copy2(os.path.join(args.save_dir, "vec_normalize.pkl"), os.path.join(args.backup_dir, "vec_normalize.pkl"))
-            print(f"📁 [Drive Backup] Final model mirrored to: {os.path.join(args.backup_dir, 'ppo_final.zip')}")
-        except Exception as e:
-            print(f"⚠️ [Drive Backup] Warning: Could not mirror final model: {e}")
+        os.makedirs(args.backup_dir, exist_ok=True)
+        for source in (final_path, last_path, os.path.join(args.save_dir, "vec_normalize.pkl")):
+            if os.path.exists(source):
+                SelfPlayCallback._mirror_file(source, os.path.join(args.backup_dir, os.path.basename(source)))
+        import json
+        manifest_path = os.path.join(args.save_dir, "v10_manifest.json")
+        with open(manifest_path, "w", encoding="utf-8") as handle:
+            json.dump({"version": "v10", "timesteps": int(model.num_timesteps),
+                       "checkpoint": "ppo_last.zip", "vec_normalize": "vec_normalize.pkl"}, handle, indent=2)
+        SelfPlayCallback._mirror_file(manifest_path, os.path.join(args.backup_dir, "v10_manifest.json"))
+    print(f"\nTraining complete! Final model saved to: {final_path}")
 
     vec_env.close()
 

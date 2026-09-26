@@ -34,6 +34,7 @@ class SelfPlayPool:
         pfsp_power: float = 1.5,
         seed: int = 42,
         device: str = "cpu",
+        verbose: int = 0,
     ):
         self.max_size = max_size
         self.history_dir = history_dir
@@ -42,6 +43,7 @@ class SelfPlayPool:
         self.pfsp_power = float(np.clip(pfsp_power, 1.0, 2.0))
         self.rng = random.Random(seed)
         self.device = torch.device(device)
+        self.verbose = int(verbose)
         self.pool: List[OpponentEntry] = []
         self._generation_counter = 0
 
@@ -81,16 +83,21 @@ class SelfPlayPool:
             policy=policy,
         )
 
-        # Evict oldest or lowest scoring entry if capacity reached
+        # Keep score-based diversity when meaningful evaluation scores exist;
+        # otherwise evict the oldest generation (all-zero scores are common).
         if len(self.pool) >= self.max_size:
-            # Sort by score ascending, remove worst
-            self.pool.sort(key=lambda x: x.score)
-            evicted = self.pool.pop(0)
-            print(f"[SelfPlayPool] Evicted opponent {evicted.tag} (score: {evicted.score:.2f})")
+            if any(abs(entry.score) > 1e-9 for entry in self.pool):
+                evict_idx = min(range(len(self.pool)), key=lambda idx: self.pool[idx].score)
+            else:
+                evict_idx = min(range(len(self.pool)), key=lambda idx: self.pool[idx].generation)
+            evicted = self.pool.pop(evict_idx)
+            if self.verbose > 1:
+                print(f"[SelfPlayPool] Evicted opponent {evicted.tag} (score: {evicted.score:.2f})")
 
         self.pool.append(entry)
         self._save_state()
-        print(f"[SelfPlayPool] Registered opponent {entry.tag} (pool size: {len(self.pool)}/{self.max_size})")
+        if self.verbose > 1:
+            print(f"[SelfPlayPool] Registered opponent {entry.tag} (pool size: {len(self.pool)}/{self.max_size})")
         return entry
 
     def sample_opponent(self) -> Optional[OpponentEntry]:
@@ -210,5 +217,4 @@ class SelfPlayPool:
                 except Exception:
                     pass
         return loaded
-
 
