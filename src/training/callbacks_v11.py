@@ -335,7 +335,8 @@ class V11TrainingCallback(BaseCallback):
             f"{info['split_actions_without_kill_30']:3d} "
             f"lifeMax={self.longest_survived_episode_steps:4d} "
             f"survival={info['survival_rate'] if completed else float('nan'):.0%} "
-            f"fps={info['fps_window']:6.1f} pool={len(self.pool)}"
+            f"fps={info['fps_window']:6.1f} pool={len(self.pool)}",
+            flush=True,
         )
         self._reset_window()
         self.last_metric_at = now
@@ -353,7 +354,11 @@ class V11TrainingCallback(BaseCallback):
             "--evaluation-milestone", str(milestone),
             "--output-jsonl", str(self.scenario_path),
         ]
-        print(f"[V11 eval] fixed-seed scenario suite at step {step:,} ({self.evaluation_episodes} seeds/scenario)")
+        print(
+            f"[V11 eval] fixed-seed scenario suite at step {step:,} "
+            f"({self.evaluation_episodes} seeds/scenario)",
+            flush=True,
+        )
         try:
             process = subprocess.Popen(command)
             try:
@@ -368,7 +373,7 @@ class V11TrainingCallback(BaseCallback):
                 if self.backup_dir and self.scenario_path.exists():
                     self._atomic_copy(self.scenario_path, self.backup_dir / self.scenario_path.name)
             if return_code:
-                print(f"[V11 eval] failed (exit={return_code}); subprocess output is above.")
+                print(f"[V11 eval] failed (exit={return_code}); subprocess output is above.", flush=True)
                 return False
             self.completed_evaluation_milestones.add(milestone)
             if self.backup_dir and self.metrics_path.exists():
@@ -445,7 +450,7 @@ class V11TrainingCallback(BaseCallback):
                 self._atomic_copy(latest, self.backup_dir / latest.name)
                 self._atomic_copy(manifest_path, self.backup_dir / manifest_path.name)
                 self.last_sync_at = time.monotonic()
-                print(f"[V11 Drive] synced step {step:,}")
+                print(f"[V11 Drive] synced step {step:,}", flush=True)
             except OSError as exc:
                 print(f"[V11 Drive] sync failed at step {step:,}; local save is intact: {exc}")
         self.last_checkpoint = step
