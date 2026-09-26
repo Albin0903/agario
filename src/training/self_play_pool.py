@@ -46,6 +46,9 @@ class SelfPlayPool:
         self.verbose = int(verbose)
         self.pool: List[OpponentEntry] = []
         self._generation_counter = 0
+        # Remember files that have been considered even after their policy is
+        # evicted from the bounded in-memory league.
+        self._known_checkpoint_paths: set[str] = set()
 
         os.makedirs(self.history_dir, exist_ok=True)
 
@@ -82,6 +85,7 @@ class SelfPlayPool:
             win_rate=float(np.clip(win_rate, 0.0, 1.0)),
             policy=policy,
         )
+        self._known_checkpoint_paths.add(os.path.abspath(checkpoint_path))
 
         # Keep score-based diversity when meaningful evaluation scores exist;
         # otherwise evict the oldest generation (all-zero scores are common).
@@ -181,16 +185,6 @@ class SelfPlayPool:
         """Scan history_dir on disk and load newly saved checkpoints in numerical order."""
         if not os.path.exists(self.history_dir):
             return 0
-        try:
-            mtime = os.path.getmtime(self.history_dir)
-            if hasattr(self, "_last_disk_mtime") and self._last_disk_mtime == mtime:
-                return 0
-            self._last_disk_mtime = mtime
-        except OSError:
-            pass
-
-        loaded = 0
-        existing_paths = set(entry.path for entry in self.pool)
         metadata = self._load_state()
 
         import re
@@ -198,23 +192,42 @@ class SelfPlayPool:
             m = re.search(r'step_(\d+)', filename)
             return int(m.group(1)) if m else 0
 
-        files = [f for f in os.listdir(self.history_dir) if f.endswith(".zip")]
+        files = [
+            f for f in os.listdir(self.history_dir)
+            if f.endswith(".zip") and not f.startswith("._")
+            and os.path.getsize(os.path.join(self.history_dir, f)) > 1000
+        ]
         files.sort(key=step_key)
 
-        for f in files:
-            full_path = os.path.join(self.history_dir, f)
-            if full_path not in existing_paths:
-                try:
-                    saved = metadata.get(full_path, {})
-                    self.add_checkpoint(
-                        full_path,
-                        score=float(saved.get("score", 0.0)),
-                        tag=saved.get("tag", f.replace(".zip", "")),
-                        win_rate=float(saved.get("win_rate", 0.5)),
-                    )
-                    existing_paths.add(full_path)
-                    loaded += 1
-                except Exception:
-                    pass
-        return loaded
+        new_paths = [
+            os.path.abspath(os.path.join(self.history_dir, f))
+            for f in files
+            if os.path.abspath(os.path.join(self.history_dir, f)) not in self._known_checkpoint_paths
+        ]
+        if not new_paths:
+            return 0
 
+        # At startup, only materialize the entries that can fit in the league.
+        # Keep saved league members first, then fill remaining slots with the
+        # newest checkpoints. Mark older files as seen so later syncs do not
+        # repeatedly deserialize and evict the same historical models.
+        preferred = [path for path in new_paths if path in metadata]
+        preferred_set = set(preferred)
+        newest = [path for path in reversed(new_paths) if path not in preferred_set]
+        selected = (preferred + newest)[: self.max_size]
+        self._known_checkpoint_paths.update(new_paths)
+
+        loaded = 0
+        for full_path in selected:
+            try:
+                saved = metadata.get(full_path, {})
+                self.add_checkpoint(
+                    full_path,
+                    score=float(saved.get("score", 0.0)),
+                    tag=saved.get("tag", os.path.basename(full_path).replace(".zip", "")),
+                    win_rate=float(saved.get("win_rate", 0.5)),
+                )
+                loaded += 1
+            except Exception:
+                pass
+        return loaded

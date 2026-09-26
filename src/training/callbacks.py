@@ -40,7 +40,7 @@ class SelfPlayCallback(BaseCallback):
         self.ent_coef_end = float(ent_coef_end)
         self.started_at = time.perf_counter()
         self._last_drive_sync = self.started_at
-        self.drive_sync_interval = 60.0
+        self.drive_sync_interval = 300.0
 
         self.last_pool_update = 0
         self.last_log_step = 0
@@ -61,6 +61,14 @@ class SelfPlayCallback(BaseCallback):
         super()._init_callback()
         self.last_pool_update = self.num_timesteps
         self.last_log_step = self.num_timesteps
+
+    def _on_training_start(self) -> None:
+        # SB3 may initialize callbacks before restoring the nonzero timestep
+        # counter for learn(reset_num_timesteps=False). Anchor thresholds only
+        # once the resumed learn call has actually started.
+        self.last_pool_update = self.num_timesteps
+        self.last_log_step = self.num_timesteps
+        self._last_drive_sync = time.perf_counter()
 
     def _on_step(self) -> bool:
         progress = float(np.clip(getattr(self.model, "_current_progress_remaining", 1.0), 0.0, 1.0))
@@ -278,7 +286,7 @@ class ProfilingCallback(BaseCallback):
         self.rollout_duration = 0.0
         self.train_duration = 0.0
         self.iteration = 0
-        self.report_every = 10
+        self.report_every = 2
 
     def _on_training_start(self) -> None:
         self.last_time = time.perf_counter()
